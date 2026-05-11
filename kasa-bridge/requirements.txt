@@ -1,0 +1,2 @@
+fastmcp>=0.1.0
+python-kasa>=0.7.0
