@@ -8,6 +8,44 @@ AI Bridges is a collection of MCP servers that let Claude Code call other AI mod
 
 Out of the box, Claude Code uses one model. These bridges add optional routes to GPT, Groq, Gemini, Hugging Face/Ollama, OpenRouter, and local Kasa devices.
 
+## Fastest path: try one bridge first
+
+Start with **Groq Bridge** because it is simple, fast, and has a free tier.
+
+```bash
+git clone https://github.com/landonlockhart15-rgb/ai-bridges.git
+cd ai-bridges
+bash setup.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+git clone https://github.com/landonlockhart15-rgb/ai-bridges.git
+cd ai-bridges
+.\setup.ps1
+```
+
+Then set one key:
+
+```bash
+export GROQ_API_KEY="your-key"
+```
+
+Windows PowerShell:
+
+```powershell
+[System.Environment]::SetEnvironmentVariable("GROQ_API_KEY", "your-key", "User")
+```
+
+Register only the Groq bridge first using the `claude mcp add` command printed by the setup script. Restart Claude Code and try a simple prompt such as:
+
+```text
+Use Groq to summarize what this repository does.
+```
+
+Once one bridge works, add the others you actually need.
+
 ## Why this exists
 
 Different tasks deserve different tools. Some work needs stronger reasoning, some needs a cheaper/free model, some should stay local, and some should control a device on your LAN. AI Bridges makes those options available as Claude Code tools.
@@ -31,7 +69,7 @@ Different tasks deserve different tools. Some work needs stronger reasoning, som
 - Control local Kasa smart devices from a Claude Code workflow.
 - Compare providers without manually switching tools.
 
-## Quick setup
+## Full setup
 
 ### 1. Clone the repo
 
