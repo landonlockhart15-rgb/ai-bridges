@@ -10,11 +10,38 @@ echo "AI Bridges Setup"
 echo "================"
 echo ""
 
+if ! command -v python3 &>/dev/null; then
+    echo "Error: python3 is not installed or not in PATH." >&2
+    exit 1
+fi
+
 for bridge in "${BRIDGES[@]}"; do
     path="$ROOT/$bridge"
     printf "Setting up %s..." "$bridge"
-    python3 -m venv "$path/venv" 2>/dev/null
-    "$path/venv/bin/pip" install -r "$path/requirements.txt" --quiet --upgrade
+    
+    if [ ! -d "$path" ]; then
+        echo " FAILED"
+        echo "Error: Directory '$bridge' does not exist." >&2
+        exit 1
+    fi
+    
+    if [ ! -f "$path/requirements.txt" ]; then
+        echo " FAILED"
+        echo "Error: requirements.txt not found in '$bridge'." >&2
+        exit 1
+    fi
+    
+    if ! python3 -m venv "$path/venv" 2>/dev/null; then
+        echo " FAILED"
+        echo "Error: Failed to create virtual environment for '$bridge'." >&2
+        exit 1
+    fi
+    
+    if ! "$path/venv/bin/pip" install -r "$path/requirements.txt" --quiet --upgrade; then
+        echo " FAILED"
+        echo "Error: pip install failed for '$bridge'." >&2
+        exit 1
+    fi
     echo " done"
 done
 
