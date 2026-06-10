@@ -2,7 +2,10 @@
   "checks": [
     {"name": "compiles", "type": "cmd",
      "cmd": ["${PYTHON}", "-m", "compileall", "-q", "."],
-     "timeout": 180}
+     "timeout": 180},
+    {"name": "bridge-integrity", "type": "cmd",
+     "cmd": ["${PYTHON}", "-m", "unittest", "discover", "-s", "tests"],
+     "timeout": 180, "expect_exit": 0}
   ],
   "live": [
     {"name": "compiles", "type": "cmd",
