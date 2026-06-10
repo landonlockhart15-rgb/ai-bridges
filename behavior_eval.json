@@ -1,0 +1,12 @@
+{
+  "checks": [
+    {"name": "compiles", "type": "cmd",
+     "cmd": ["${PYTHON}", "-m", "compileall", "-q", "."],
+     "timeout": 180}
+  ],
+  "live": [
+    {"name": "compiles", "type": "cmd",
+     "cmd": ["${PYTHON}", "-m", "compileall", "-q", "."],
+     "timeout": 180}
+  ]
+}
