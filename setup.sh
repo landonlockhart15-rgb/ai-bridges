@@ -10,13 +10,16 @@ echo "AI Bridges Setup"
 echo "================"
 echo ""
 
+echo "Setting up all bridges in parallel (this may take a moment)..."
 for bridge in "${BRIDGES[@]}"; do
-    path="$ROOT/$bridge"
-    printf "Setting up %s..." "$bridge"
-    python3 -m venv "$path/venv" 2>/dev/null
-    "$path/venv/bin/pip" install -r "$path/requirements.txt" --quiet --upgrade
-    echo " done"
+    (
+        path="$ROOT/$bridge"
+        python3 -m venv "$path/venv" 2>/dev/null
+        "$path/venv/bin/pip" install -r "$path/requirements.txt" --quiet --upgrade 2>/dev/null
+        echo "  $bridge: done"
+    ) &
 done
+wait
 
 echo ""
 echo "All bridges ready."

@@ -9,12 +9,29 @@ Write-Host "AI Bridges Setup" -ForegroundColor Cyan
 Write-Host "================" -ForegroundColor Cyan
 Write-Host ""
 
+$jobs = @()
 foreach ($bridge in $bridges) {
     $path = Join-Path $root $bridge
-    Write-Host "Setting up $bridge..." -NoNewline
-    python -m venv "$path\venv" 2>$null
-    & "$path\venv\Scripts\pip.exe" install -r "$path\requirements.txt" --quiet --upgrade
-    Write-Host " done" -ForegroundColor Green
+    $job = Start-Job -ScriptBlock {
+        param($path, $bridge)
+        python -m venv "$path\venv" 2>$null
+        & "$path\venv\Scripts\pip.exe" install -r "$path\requirements.txt" --quiet --upgrade 2>$null
+        return $bridge
+    } -ArgumentList $path, $bridge
+    $jobs += $job
+}
+
+Write-Host "Setting up all bridges in parallel (this may take a moment)..." -ForegroundColor Cyan
+
+$remainingJobs = @($jobs)
+while ($remainingJobs.Count -gt 0) {
+    $completedJob = Wait-Job -Job $remainingJobs -Any
+    $bridgeName = Receive-Job -Job $completedJob
+    if ($bridgeName) {
+        Write-Host "  $($bridgeName): done" -ForegroundColor Green
+    }
+    $remainingJobs = @($remainingJobs | Where-Object { $_.Id -ne $completedJob.Id })
+    Remove-Job -Job $completedJob
 }
 
 Write-Host ""
