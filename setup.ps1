@@ -14,38 +14,39 @@ if (-not (Get-Command "python" -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
+$ErrorActionPreference = "Stop"
+
 foreach ($bridge in $bridges) {
     $path = Join-Path $root $bridge
     Write-Host "Setting up $bridge..." -NoNewline
     
-    if (-not (Test-Path $path -PathType Container)) {
+    try {
+        if (-not (Test-Path $path -PathType Container)) {
+            throw "Directory '$bridge' does not exist."
+        }
+        
+        $reqPath = Join-Path $path "requirements.txt"
+        if (-not (Test-Path $reqPath -PathType Leaf)) {
+            throw "requirements.txt not found in '$bridge'."
+        }
+        
+        python -m venv "$path\venv" 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$path\venv\Scripts\pip.exe" -PathType Leaf)) {
+            throw "Failed to create virtual environment for '$bridge'."
+        }
+        
+        & "$path\venv\Scripts\pip.exe" install -r $reqPath --quiet --upgrade
+        if ($LASTEXITCODE -ne 0) {
+            throw "pip install failed for '$bridge'."
+        }
+        
+        Write-Host " done" -ForegroundColor Green
+    }
+    catch {
         Write-Host " FAILED" -ForegroundColor Red
-        Write-Host "Error: Directory '$bridge' does not exist." -ForegroundColor Red
+        Write-Host "Error: $_" -ForegroundColor Red
         exit 1
     }
-    
-    $reqPath = Join-Path $path "requirements.txt"
-    if (-not (Test-Path $reqPath -PathType Leaf)) {
-        Write-Host " FAILED" -ForegroundColor Red
-        Write-Host "Error: requirements.txt not found in '$bridge'." -ForegroundColor Red
-        exit 1
-    }
-    
-    python -m venv "$path\venv" 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$path\venv\Scripts\pip.exe" -PathType Leaf)) {
-        Write-Host " FAILED" -ForegroundColor Red
-        Write-Host "Error: Failed to create virtual environment for '$bridge'." -ForegroundColor Red
-        exit 1
-    }
-    
-    & "$path\venv\Scripts\pip.exe" install -r $reqPath --quiet --upgrade
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host " FAILED" -ForegroundColor Red
-        Write-Host "Error: pip install failed for '$bridge'." -ForegroundColor Red
-        exit 1
-    }
-    
-    Write-Host " done" -ForegroundColor Green
 }
 
 Write-Host ""

@@ -2,6 +2,17 @@
 # setup.sh — Mac/Linux setup script for AI Bridges
 # Run from the repo root: bash setup.sh
 
+set -euo pipefail
+
+failure_handler() {
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ]; then
+        echo " FAILED"
+        echo "Error: An unexpected error occurred on line $1 (exit code $exit_code)." >&2
+    fi
+}
+trap 'failure_handler $LINENO' ERR
+
 BRIDGES=("gpt-bridge" "groq-bridge" "gemini-bridge" "hf-bridge" "openrouter-bridge" "kasa-bridge")
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
