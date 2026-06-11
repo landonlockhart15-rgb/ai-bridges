@@ -2,6 +2,15 @@ import os
 from mcp.server.fastmcp import FastMCP
 from openai import OpenAI
 
+# Validate GROQ_API_KEY environment variable
+api_key = os.environ.get("GROQ_API_KEY")
+if not api_key:
+    raise ValueError("GROQ_API_KEY environment variable is not set")
+if not api_key.startswith("gsk_"):
+    raise ValueError("GROQ_API_KEY must start with 'gsk_'")
+if any(c.isspace() for c in api_key):
+    raise ValueError("GROQ_API_KEY must not contain whitespace")
+
 mcp = FastMCP("groq-bridge")
 
 def _client():
