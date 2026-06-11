@@ -5,11 +5,30 @@
      "timeout": 180},
     {"name": "bridge-integrity", "type": "cmd",
      "cmd": ["${PYTHON}", "-m", "unittest", "discover", "-s", "tests"],
+     "timeout": 180, "expect_exit": 0},
+    {"name": "groq-key-missing", "type": "cmd",
+     "cmd": ["${PYTHON}", "-c", "import os, sys; os.environ.pop('GROQ_API_KEY', None); sys.path.insert(0, 'groq-bridge'); import server"],
+     "timeout": 180, "expect_exit": 1},
+    {"name": "groq-key-invalid", "type": "cmd",
+     "cmd": ["${PYTHON}", "-c", "import os, sys; os.environ['GROQ_API_KEY'] = 'invalid_key'; sys.path.insert(0, 'groq-bridge'); import server"],
+     "timeout": 180, "expect_exit": 1},
+    {"name": "groq-key-valid", "type": "cmd",
+     "cmd": ["${PYTHON}", "-c", "import os, sys; os.environ['GROQ_API_KEY'] = 'gsk_validkey12345'; sys.path.insert(0, 'groq-bridge'); import server"],
      "timeout": 180, "expect_exit": 0}
   ],
   "live": [
     {"name": "compiles", "type": "cmd",
      "cmd": ["${PYTHON}", "-m", "compileall", "-q", "."],
-     "timeout": 180}
+     "timeout": 180},
+    {"name": "groq-key-missing", "type": "cmd",
+     "cmd": ["${PYTHON}", "-c", "import os, sys; os.environ.pop('GROQ_API_KEY', None); sys.path.insert(0, 'groq-bridge'); import server"],
+     "timeout": 180, "expect_exit": 1},
+    {"name": "groq-key-invalid", "type": "cmd",
+     "cmd": ["${PYTHON}", "-c", "import os, sys; os.environ['GROQ_API_KEY'] = 'invalid_key'; sys.path.insert(0, 'groq-bridge'); import server"],
+     "timeout": 180, "expect_exit": 1},
+    {"name": "groq-key-valid", "type": "cmd",
+     "cmd": ["${PYTHON}", "-c", "import os, sys; os.environ['GROQ_API_KEY'] = 'gsk_validkey12345'; sys.path.insert(0, 'groq-bridge'); import server"],
+     "timeout": 180, "expect_exit": 0}
   ]
 }
+
