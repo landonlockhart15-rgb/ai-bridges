@@ -8,6 +8,8 @@ if not api_key:
     raise ValueError("GROQ_API_KEY environment variable is not set")
 if not api_key.startswith("gsk_"):
     raise ValueError("GROQ_API_KEY must start with 'gsk_'")
+if len(api_key) < 15:
+    raise ValueError("GROQ_API_KEY must be at least 15 characters long")
 if any(c.isspace() for c in api_key):
     raise ValueError("GROQ_API_KEY must not contain whitespace")
 
