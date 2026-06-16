@@ -2,8 +2,8 @@
 
 > Read this before proposing or reviewing any change. It defines what this
 > project is *trying to be*. A change can be correct and still be wrong if it
-> doesn't serve this. Private hobby project — goals are **capability, reliability,
-> and cost-awareness**, plus learning while building. No revenue target.
+> doesn't serve this. Private hobby project — goals are **reliability, smart
+> routing, and speed**, plus learning while building. No revenue target.
 
 ## What this really is
 The connective tissue that gives every agent drop-in access to many LLM
@@ -13,8 +13,13 @@ the job, cheaply" actually work, enforcing the cost hierarchy: **free cloud →
 local → paid last**.
 
 ## What "great" looks like
-- **Reliable.** Bridges connect, degrade gracefully, fall back across providers,
-  and fail with clear errors — never silently or confusingly.
+- **Very reliable — and the fallbacks especially.** Bridges connect, degrade
+  gracefully, fall back across providers **dependably**, and fail with clear errors
+  — never silently or confusingly. The fallback chain must just work.
+- **Smart routing.** Genuinely intelligent about which model to call for which job
+  — the right model, not just the first one.
+- **Fast — minimal latency.** Speed is a first-class goal: as little overhead and
+  latency as possible between request and answer.
 - **Cost-aware by default.** Free and local first; paid only as a deliberate last
   resort. The routing should make the cheap-correct choice obvious.
 - **Easy to extend.** Adding a new provider/bridge is clean and consistent with
