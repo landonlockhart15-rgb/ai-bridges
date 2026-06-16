@@ -6,7 +6,7 @@
 
 AI Bridges is a collection of MCP servers that let Claude Code call other AI models and control TP-Link Kasa smart-home devices from inside a Claude Code conversation.
 
-Out of the box, Claude Code uses one model. These bridges add optional routes to GPT, Groq, Gemini, Hugging Face/Ollama, OpenRouter, and local Kasa devices.
+Out of the box, Claude Code uses one model. These bridges add optional routes to GPT, Groq, Gemini, Hugging Face/Ollama, OpenRouter, Cerebras, and local Kasa devices.
 
 ## Fastest path: try one bridge first
 
@@ -59,6 +59,7 @@ Different tasks deserve different tools. Some work needs stronger reasoning, som
 | **gemini-bridge** | Calls Google Gemini models | Free tier available |
 | **hf-bridge** | Calls local Ollama models or Hugging Face cloud models | Local/free options |
 | **openrouter-bridge** | Routes to many models through OpenRouter | Free and paid models |
+| **cerebras-bridge** | Calls Llama and GLM models via Cerebras | Free tier (1M tokens/day) |
 | **kasa-bridge** | Discovers and controls TP-Link Kasa devices by name | Local network |
 
 ## Use cases
@@ -106,6 +107,7 @@ Each bridge reads its key from an environment variable.
 [System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY",      "your-key", "User")
 [System.Environment]::SetEnvironmentVariable("HF_TOKEN",            "your-key", "User")
 [System.Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY",  "your-key", "User")
+[System.Environment]::SetEnvironmentVariable("CEREBRAS_API_KEY",    "your-key", "User")
 ```
 
 **Mac / Linux — add to your `~/.zshrc` or `~/.bashrc`:**
@@ -116,6 +118,7 @@ export GROQ_API_KEY="your-key"
 export GEMINI_API_KEY="your-key"
 export HF_TOKEN="your-key"
 export OPENROUTER_API_KEY="your-key"
+export CEREBRAS_API_KEY="your-key"
 ```
 
 | Bridge | Environment variable | Where to get the key |
@@ -125,6 +128,7 @@ export OPENROUTER_API_KEY="your-key"
 | gemini-bridge | `GEMINI_API_KEY` | Google AI Studio |
 | hf-bridge | `HF_TOKEN` | Hugging Face tokens |
 | openrouter-bridge | `OPENROUTER_API_KEY` | OpenRouter keys |
+| cerebras-bridge | `CEREBRAS_API_KEY` | Cerebras Console |
 | kasa-bridge | No key needed | Local network |
 
 ### 4. Register with Claude Code
@@ -141,6 +145,7 @@ claude mcp add groq-bridge        -- "C:/ai-bridges/groq-bridge/venv/Scripts/pyt
 claude mcp add gem-bridge         -- "C:/ai-bridges/gemini-bridge/venv/Scripts/python.exe"      "C:/ai-bridges/gemini-bridge/server.py"
 claude mcp add hf-bridge          -- "C:/ai-bridges/hf-bridge/venv/Scripts/python.exe"          "C:/ai-bridges/hf-bridge/server.py"
 claude mcp add openrouter-bridge  -- "C:/ai-bridges/openrouter-bridge/venv/Scripts/python.exe"  "C:/ai-bridges/openrouter-bridge/server.py"
+claude mcp add cerebras-bridge    -- "C:/ai-bridges/cerebras-bridge/venv/Scripts/python.exe"    "C:/ai-bridges/cerebras-bridge/server.py"
 claude mcp add kasa-bridge        -- "C:/ai-bridges/kasa-bridge/venv/Scripts/python.exe"        "C:/ai-bridges/kasa-bridge/server.py"
 ```
 
@@ -190,8 +195,17 @@ Cloud Hugging Face models require `HF_TOKEN`.
 
 | Tool | Description |
 |------|-------------|
-| `ask_openrouter(prompt, model)` | Send to an OpenRouter model. |
+| `ask_openrouter(prompt, model)` | Send a prompt to OpenRouter. |
 | `ask_openrouter_with_context(system, prompt, model)` | Send with a system prompt. |
+
+### cerebras-bridge
+
+| Tool | Description |
+|------|-------------|
+| `ask_cerebras(prompt, model)` | Send a prompt to Cerebras. |
+| `ask_cerebras_with_context(system, prompt, model)` | Send with a system prompt. |
+
+Example Cerebras models: `gpt-oss-120b` (default), `zai-glm-4.7`.
 
 ### kasa-bridge
 
@@ -216,6 +230,7 @@ ai-bridges/
 ├── gemini-bridge/
 ├── hf-bridge/
 ├── openrouter-bridge/
+├── cerebras-bridge/
 └── kasa-bridge/
 ```
 
