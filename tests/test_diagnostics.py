@@ -60,7 +60,8 @@ class TestDiagnostics(unittest.TestCase):
             "mcpServers": {
                 "groq-bridge": {},
                 "hf-bridge": {},
-                "gem-bridge": {}
+                "gem-bridge": {},
+                "cerebras-bridge": {}
             }
         })
         mock_open.return_value.__enter__.return_value = mock_file
@@ -69,6 +70,7 @@ class TestDiagnostics(unittest.TestCase):
         self.assertTrue(registered["groq-bridge"])
         self.assertTrue(registered["hf-bridge"])
         self.assertTrue(registered["gemini-bridge"])
+        self.assertTrue(registered["cerebras-bridge"])
         self.assertFalse(registered["gpt-bridge"])
         
     @patch("urllib.request.urlopen")
@@ -136,6 +138,7 @@ class TestDiagnostics(unittest.TestCase):
             "gemini-bridge": False,
             "hf-bridge": True,
             "openrouter-bridge": True,
+            "cerebras-bridge": True,
             "kasa-bridge": True
         }
         
@@ -155,6 +158,7 @@ class TestDiagnostics(unittest.TestCase):
         report = check_bridges.check_bridges()
         self.assertIn("# 🛠️ AI Bridges Unified Diagnostics", report)
         self.assertIn("groq-bridge", report)
+        self.assertIn("cerebras-bridge", report)
         self.assertIn("🟢 Yes", report) # Registered groq
         self.assertIn("⚪ No", report) # Unregistered gpt
         self.assertIn("Ollama mock running", report)

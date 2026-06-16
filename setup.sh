@@ -13,7 +13,7 @@ failure_handler() {
 }
 trap 'failure_handler $LINENO' ERR
 
-BRIDGES=("gpt-bridge" "groq-bridge" "gemini-bridge" "hf-bridge" "openrouter-bridge" "kasa-bridge")
+BRIDGES=("gpt-bridge" "groq-bridge" "gemini-bridge" "hf-bridge" "openrouter-bridge" "kasa-bridge" "cerebras-bridge")
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo ""
@@ -70,6 +70,7 @@ declare -A NAMES=(
     ["hf-bridge"]="hf-bridge"
     ["openrouter-bridge"]="openrouter-bridge"
     ["kasa-bridge"]="kasa-bridge"
+    ["cerebras-bridge"]="cerebras-bridge"
 )
 
 for folder in "${BRIDGES[@]}"; do

@@ -53,7 +53,8 @@ def check_registration():
         "gemini-bridge": False,
         "hf-bridge": False,
         "openrouter-bridge": False,
-        "kasa-bridge": False
+        "kasa-bridge": False,
+        "cerebras-bridge": False
     }
     
     paths = []
@@ -97,6 +98,8 @@ def check_registration():
                             registered["openrouter-bridge"] = True
                         elif name == "kasa-bridge":
                             registered["kasa-bridge"] = True
+                        elif name == "cerebras-bridge":
+                            registered["cerebras-bridge"] = True
             except Exception:
                 pass
     return registered
@@ -175,6 +178,7 @@ def run_bridge_diagnostic(bridge_id, reg_status):
         "groq-bridge": "GROQ_API_KEY",
         "gemini-bridge": "GEMINI_API_KEY",
         "openrouter-bridge": "OPENROUTER_API_KEY",
+        "cerebras-bridge": "CEREBRAS_API_KEY",
         "hf-bridge": "HF_TOKEN",
         "kasa-bridge": None
     }
@@ -223,6 +227,11 @@ def run_bridge_diagnostic(bridge_id, reg_status):
         elif bridge_id == "openrouter-bridge":
             success, latency, msg = ping_api(
                 "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {key}"}
+            )
+        elif bridge_id == "cerebras-bridge":
+            success, latency, msg = ping_api(
+                "https://api.cerebras.ai/v1/models",
                 headers={"Authorization": f"Bearer {key}"}
             )
         elif bridge_id == "hf-bridge":
@@ -292,6 +301,7 @@ def check_bridges() -> str:
         ("groq-bridge", "Groq"),
         ("gemini-bridge", "Gemini"),
         ("openrouter-bridge", "OpenRouter"),
+        ("cerebras-bridge", "Cerebras"),
         ("hf-bridge", "Hugging Face / Ollama"),
         ("kasa-bridge", "TP-Link Kasa")
     ]
