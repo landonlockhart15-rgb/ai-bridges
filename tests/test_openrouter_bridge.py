@@ -26,8 +26,17 @@ sys.modules['mcp'] = MagicMock()
 sys.modules['mcp.server'] = MagicMock()
 sys.modules['mcp.server.fastmcp'] = mock_fastmcp_mod
 
+class MockRateLimitError(Exception):
+    def __init__(self, message="Rate limit exceeded", response=None, body=None):
+        super().__init__(message)
+        self.status_code = 429
+        self.response = response
+        self.body = body
+
 # Mock OpenAI client
 class MockOpenAI:
+    failing_models = set()
+
     def __init__(self, api_key=None, base_url=None, default_headers=None):
         self.api_key = api_key
         self.base_url = base_url
@@ -37,6 +46,9 @@ class MockOpenAI:
         self.chat.completions.create = MagicMock(side_effect=self._mock_create)
 
     def _mock_create(self, model, messages, **kwargs):
+        if model in self.failing_models:
+            raise MockRateLimitError(f"Rate limit exceeded for model: {model}")
+
         mock_response = MagicMock()
         mock_choice = MagicMock()
         mock_message = MagicMock()
@@ -56,6 +68,7 @@ class MockOpenAI:
 
 mock_openai_mod = MagicMock()
 mock_openai_mod.OpenAI = MockOpenAI
+mock_openai_mod.RateLimitError = MockRateLimitError
 sys.modules['openai'] = mock_openai_mod
 
 # Import openrouter-bridge server using importlib
@@ -110,6 +123,45 @@ class TestOpenRouterBridge(unittest.TestCase):
             result, 
             "Response from nvidia/nemotron-3-super-120b-a12b:free for System: You are a helpful assistant | User: Hello"
         )
+
+    @patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'})
+    def test_ask_openrouter_fallback_success(self):
+        MockOpenAI.failing_models = {"nvidia/nemotron-3-super-120b-a12b:free"}
+        try:
+            result = openrouter_server.ask_openrouter(prompt="Hello")
+            # Should fall back to google/gemma-4-31b-it:free (second in FREE_MODELS)
+            self.assertEqual(
+                result,
+                "Response from google/gemma-4-31b-it:free for User: Hello"
+            )
+        finally:
+            MockOpenAI.failing_models.clear()
+
+    @patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'})
+    def test_ask_openrouter_fallback_all_fail(self):
+        MockOpenAI.failing_models = set(openrouter_server.FREE_MODELS)
+        try:
+            with self.assertRaises(MockRateLimitError):
+                openrouter_server.ask_openrouter(prompt="Hello")
+        finally:
+            MockOpenAI.failing_models.clear()
+
+    @patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'})
+    def test_ask_openrouter_fallback_custom_model(self):
+        MockOpenAI.failing_models = {"custom-paid-model", "nvidia/nemotron-3-super-120b-a12b:free"}
+        try:
+            result = openrouter_server.ask_openrouter(
+                prompt="Hello",
+                model="custom-paid-model"
+            )
+            # Should fail for custom-paid-model, then fail for nemotron-3-super-120b-a12b:free,
+            # and succeed on google/gemma-4-31b-it:free
+            self.assertEqual(
+                result,
+                "Response from google/gemma-4-31b-it:free for User: Hello"
+            )
+        finally:
+            MockOpenAI.failing_models.clear()
 
 
 if __name__ == "__main__":
