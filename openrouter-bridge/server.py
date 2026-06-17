@@ -4,6 +4,10 @@ from mcp.server.fastmcp import FastMCP
 import openai
 from openai import OpenAI
 
+# Add repository root to path so we can import usage_tracker
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import usage_tracker
+
 mcp = FastMCP("openrouter-bridge")
 
 # Free models on OpenRouter (append :free to get zero-cost tier).
@@ -39,10 +43,17 @@ def _ask_openrouter_with_fallback(messages: list, model: str) -> str:
 
     client = _client()
     for i, current_model in enumerate(models_to_try):
+        usage_tracker.check_budget("openrouter-bridge", current_model)
         try:
             response = client.chat.completions.create(
                 model=current_model,
                 messages=messages,
+            )
+            usage_tracker.record_usage(
+                provider="openrouter-bridge",
+                model=current_model,
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens
             )
             return response.choices[0].message.content
         except openai.RateLimitError as e:
@@ -80,6 +91,14 @@ def ask_openrouter_with_context(system: str, prompt: str, model: str = "nvidia/n
         ],
         model=model,
     )
+
+@mcp.tool()
+def get_bridge_costs(timeframe: str = "all") -> str:
+    """
+    Get a summary of the tokens used and costs incurred across all AI bridges.
+    timeframe: 'all', 'today', or 'month'
+    """
+    return usage_tracker.get_bridge_costs(timeframe)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
