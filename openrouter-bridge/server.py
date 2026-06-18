@@ -6,9 +6,11 @@ from openai import OpenAI
 
 # Add repository root to path so we can import usage_tracker
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import bridge_state
 import usage_tracker
 
 mcp = FastMCP("openrouter-bridge")
+PROVIDER = "openrouter-bridge"
 
 # Free models on OpenRouter (append :free to get zero-cost tier).
 # When one hits rate limits, switch model — they each have independent quotas.
@@ -41,31 +43,44 @@ def _ask_openrouter_with_fallback(messages: list, model: str) -> str:
         # then fall back to the FREE_MODELS in order.
         models_to_try = [model] + FREE_MODELS
 
+    available_models = bridge_state.filter_available_models(PROVIDER, models_to_try)
+    if not available_models:
+        bridge_state.raise_if_unavailable(PROVIDER)
+        raise bridge_state.ProviderUnavailableError(f"No OpenRouter models are currently available")
+
     client = _client()
-    for i, current_model in enumerate(models_to_try):
-        usage_tracker.check_budget("openrouter-bridge", current_model)
+    for i, current_model in enumerate(available_models):
+        usage_tracker.check_budget(PROVIDER, current_model)
         try:
             response = client.chat.completions.create(
                 model=current_model,
                 messages=messages,
             )
+            bridge_state.mark_available(PROVIDER)
+            bridge_state.mark_available(PROVIDER, current_model)
             usage_tracker.record_usage(
-                provider="openrouter-bridge",
+                provider=PROVIDER,
                 model=current_model,
                 prompt_tokens=response.usage.prompt_tokens,
                 completion_tokens=response.usage.completion_tokens
             )
             return response.choices[0].message.content
         except openai.RateLimitError as e:
-            if i < len(models_to_try) - 1:
-                next_model = models_to_try[i + 1]
+            bridge_state.mark_unavailable(PROVIDER, "rate_limit", model=current_model)
+            if i < len(available_models) - 1:
+                next_model = available_models[i + 1]
                 print(
                     f"Rate limit hit for model '{current_model}' (HTTP 429). "
                     f"Falling back to '{next_model}'...",
                     file=sys.stderr
                 )
             else:
+                bridge_state.mark_unavailable(PROVIDER, "rate_limit")
                 raise
+        except Exception as e:
+            if e.__class__.__name__ in ("APIConnectionError", "APITimeoutError", "ConnectError", "ReadTimeout"):
+                bridge_state.mark_unavailable(PROVIDER, "connection_error")
+            raise
 
 @mcp.tool()
 def ask_openrouter(prompt: str, model: str = "nvidia/nemotron-3-super-120b-a12b:free") -> str:
