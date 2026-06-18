@@ -79,6 +79,24 @@ spec.loader.exec_module(openrouter_server)
 
 
 class TestOpenRouterBridge(unittest.TestCase):
+    def setUp(self):
+        self._clear_state()
+
+    def tearDown(self):
+        self._clear_state()
+        MockOpenAI.failing_models.clear()
+
+    def _clear_state(self):
+        for path in (
+            openrouter_server.bridge_state.STATE_FILE_PATH,
+            openrouter_server.bridge_state.LOCK_FILE_PATH,
+        ):
+            if Path(path).exists():
+                try:
+                    Path(path).unlink()
+                except OSError:
+                    pass
+
     @patch.dict('os.environ', {
         'OPENROUTER_API_KEY': 'test-key',
         'OPENROUTER_REFERER': 'test-referer',
@@ -127,41 +145,53 @@ class TestOpenRouterBridge(unittest.TestCase):
     @patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'})
     def test_ask_openrouter_fallback_success(self):
         MockOpenAI.failing_models = {"nvidia/nemotron-3-super-120b-a12b:free"}
-        try:
-            result = openrouter_server.ask_openrouter(prompt="Hello")
-            # Should fall back to google/gemma-4-31b-it:free (second in FREE_MODELS)
-            self.assertEqual(
-                result,
-                "Response from google/gemma-4-31b-it:free for User: Hello"
+        result = openrouter_server.ask_openrouter(prompt="Hello")
+        # Should fall back to google/gemma-4-31b-it:free (second in FREE_MODELS)
+        self.assertEqual(
+            result,
+            "Response from google/gemma-4-31b-it:free for User: Hello"
+        )
+        self.assertFalse(
+            openrouter_server.bridge_state.is_available(
+                "openrouter-bridge",
+                "nvidia/nemotron-3-super-120b-a12b:free",
             )
-        finally:
-            MockOpenAI.failing_models.clear()
+        )
 
     @patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'})
     def test_ask_openrouter_fallback_all_fail(self):
         MockOpenAI.failing_models = set(openrouter_server.FREE_MODELS)
-        try:
-            with self.assertRaises(MockRateLimitError):
-                openrouter_server.ask_openrouter(prompt="Hello")
-        finally:
-            MockOpenAI.failing_models.clear()
+        with self.assertRaises(MockRateLimitError):
+            openrouter_server.ask_openrouter(prompt="Hello")
+        self.assertFalse(openrouter_server.bridge_state.is_available("openrouter-bridge"))
 
     @patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'})
     def test_ask_openrouter_fallback_custom_model(self):
         MockOpenAI.failing_models = {"custom-paid-model", "nvidia/nemotron-3-super-120b-a12b:free"}
-        try:
-            result = openrouter_server.ask_openrouter(
-                prompt="Hello",
-                model="custom-paid-model"
-            )
-            # Should fail for custom-paid-model, then fail for nemotron-3-super-120b-a12b:free,
-            # and succeed on google/gemma-4-31b-it:free
-            self.assertEqual(
-                result,
-                "Response from google/gemma-4-31b-it:free for User: Hello"
-            )
-        finally:
-            MockOpenAI.failing_models.clear()
+        result = openrouter_server.ask_openrouter(
+            prompt="Hello",
+            model="custom-paid-model"
+        )
+        # Should fail for custom-paid-model, then fail for nemotron-3-super-120b-a12b:free,
+        # and succeed on google/gemma-4-31b-it:free
+        self.assertEqual(
+            result,
+            "Response from google/gemma-4-31b-it:free for User: Hello"
+        )
+
+    @patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'})
+    def test_ask_openrouter_skips_models_in_cooldown(self):
+        openrouter_server.bridge_state.mark_unavailable(
+            "openrouter-bridge",
+            "rate_limit",
+            model="nvidia/nemotron-3-super-120b-a12b:free",
+            cooldown_seconds=60,
+        )
+        result = openrouter_server.ask_openrouter(prompt="Hello")
+        self.assertEqual(
+            result,
+            "Response from google/gemma-4-31b-it:free for User: Hello"
+        )
 
 
 if __name__ == "__main__":
