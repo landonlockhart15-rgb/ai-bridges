@@ -5,8 +5,14 @@
       "models": {
         "llama-3.3-70b-versatile": {
           "cooldown_until": 0,
+          "latency_history": [
+            0.0026853084564208984
+          ],
           "reason": null,
-          "status": "ok"
+          "status": "ok",
+          "success_history": [
+            1
+          ]
         }
       },
       "reason": null,

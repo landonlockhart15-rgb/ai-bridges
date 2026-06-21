@@ -116,7 +116,8 @@ def mark_unavailable(provider, reason, model=None, cooldown_seconds=None):
         if model is None:
             provider_state.update(update)
         else:
-            provider_state.setdefault("models", {})[model] = update
+            model_state = provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
+            model_state.update(update)
         save_state(state)
 
 
@@ -127,7 +128,8 @@ def mark_available(provider, model=None):
         if model is None:
             provider_state.update({"status": "ok", "reason": None, "cooldown_until": 0})
         else:
-            provider_state.setdefault("models", {})[model] = {"status": "ok", "reason": None, "cooldown_until": 0}
+            model_state = provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
+            model_state.update({"status": "ok", "reason": None, "cooldown_until": 0})
         save_state(state)
 
 
