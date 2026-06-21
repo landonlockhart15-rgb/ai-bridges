@@ -24,6 +24,10 @@ class MockRateLimitError(Exception):
     pass
 
 
+class APIConnectionError(Exception):
+    pass
+
+
 class MockOpenAI:
     calls = []
     failing_models = set()
@@ -40,6 +44,8 @@ class MockOpenAI:
         self.calls.append((self.base_url, model))
         if model in self.failing_models:
             raise MockRateLimitError(f"rate limit for {model}")
+        if self.base_url and ("localhost" in self.base_url or "127.0.0.1" in self.base_url):
+            raise APIConnectionError("Connection refused")
         response = MagicMock()
         response.usage.prompt_tokens = 3
         response.usage.completion_tokens = 4
@@ -57,6 +63,7 @@ sys.modules["mcp.server.fastmcp"] = mock_fastmcp_mod
 mock_openai_mod = MagicMock()
 mock_openai_mod.OpenAI = MockOpenAI
 mock_openai_mod.RateLimitError = MockRateLimitError
+mock_openai_mod.APIConnectionError = APIConnectionError
 sys.modules["openai"] = mock_openai_mod
 
 mock_google_mod = MagicMock()
@@ -214,6 +221,69 @@ class TestSmartRouterBridge(unittest.TestCase):
             if lock_file.exists():
                 lock_file.unlink()
 
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key"}, clear=True)
+    def test_dynamic_latency_routing_prioritizes_faster_bridge(self):
+        # 1. No metrics initially: groq-bridge is first in tier because of default definition order
+        routes1 = smart_router._routes_for("auto")
+        free_cloud_providers1 = [r.provider for r in routes1 if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")]
+        self.assertEqual(free_cloud_providers1[0], "groq-bridge")
+        self.assertEqual(free_cloud_providers1[1], "gemini-bridge")
+
+        # 2. Record metrics: Groq avg latency = 2.0s, Gemini avg latency = 0.5s
+        smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=2.0, success=True)
+        smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=0.5, success=True)
+
+        # 3. Routes should be sorted so that Gemini comes first in the free-cloud tier
+        routes2 = smart_router._routes_for("auto")
+        free_cloud_providers2 = [r.provider for r in routes2 if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")]
+        self.assertEqual(free_cloud_providers2[0], "gemini-bridge")
+        self.assertEqual(free_cloud_providers2[1], "groq-bridge")
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key"}, clear=True)
+    def test_dynamic_latency_routing_deprioritizes_unreliable_bridge(self):
+        # Record metrics:
+        # Groq: 0.2s latency, but 50% success (1 success, 1 failure)
+        smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=0.2, success=True)
+        smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=0.2, success=False)
+        # Gemini: 0.5s latency, 100% success (2 successes)
+        smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=0.5, success=True)
+        smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=0.5, success=True)
+
+        # 3. Gemini has higher success rate, so it is prioritized even though Groq is faster when it succeeds
+        routes = smart_router._routes_for("auto")
+        free_cloud_providers = [r.provider for r in routes if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")]
+        self.assertEqual(free_cloud_providers[0], "gemini-bridge")
+        self.assertEqual(free_cloud_providers[1], "groq-bridge")
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
+    def test_successful_ask_smart_persists_latency_metrics(self):
+        result = smart_router.ask_smart("metric persistence", "auto")
+        self.assertEqual(result, "llama-3.3-70b-versatile: metric persistence")
+
+        metrics = smart_router.bridge_state.get_metrics("groq-bridge", "llama-3.3-70b-versatile")
+        self.assertEqual(metrics["success_history"], [1])
+        self.assertEqual(len(metrics["latency_history"]), 1)
+        self.assertGreaterEqual(metrics["latency_history"][0], 0)
+        self.assertLess(metrics["avg_latency"], 9999.0)
+
+    def test_record_metric_keeps_only_the_ten_most_recent_samples(self):
+        for i in range(12):
+            smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=float(i), success=i % 3 != 0)
+
+        metrics = smart_router.bridge_state.get_metrics("groq-bridge", "llama-3.3-70b-versatile")
+        self.assertEqual(metrics["latency_history"], [float(i) for i in range(2, 12)])
+        self.assertEqual(metrics["success_history"], [1, 0, 1, 1, 0, 1, 1, 0, 1, 1])
+        self.assertEqual(metrics["success_rate"], 0.7)
+        self.assertEqual(metrics["avg_latency"], 6.5)
+
+    def test_get_metrics_treats_missing_model_as_unseen_and_reliable_but_slow(self):
+        metrics = smart_router.bridge_state.get_metrics("missing-provider", "missing-model")
+        self.assertEqual(metrics["latency_history"], [])
+        self.assertEqual(metrics["success_history"], [])
+        self.assertEqual(metrics["avg_latency"], 9999.0)
+        self.assertEqual(metrics["success_rate"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
