@@ -1,0 +1,41 @@
+{
+  "providers": {
+    "gemini-bridge": {
+      "models": {
+        "gemini-2.5-flash": {
+          "cooldown_until": 1782003073.3050148,
+          "last_error_at": "2026-06-21T00:46:13Z",
+          "model": "gemini-2.5-flash",
+          "reason": "RuntimeError",
+          "status": "cooldown"
+        }
+      },
+      "status": "ok"
+    },
+    "gpt-bridge": {
+      "cooldown_until": 0,
+      "models": {
+        "gpt-4o-mini": {
+          "cooldown_until": 0,
+          "reason": null,
+          "status": "ok"
+        }
+      },
+      "reason": null,
+      "status": "ok"
+    },
+    "hf-bridge": {
+      "models": {
+        "gemma4:latest": {
+          "cooldown_until": 1782003073.3230014,
+          "last_error_at": "2026-06-21T00:46:13Z",
+          "model": "gemma4:latest",
+          "reason": "MockRateLimitError",
+          "status": "cooldown"
+        }
+      },
+      "status": "ok"
+    }
+  },
+  "version": 1
+}

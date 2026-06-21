@@ -1,7 +1,7 @@
 # setup.ps1 — Windows setup script for AI Bridges
 # Run from the repo root: .\setup.ps1
 
-$bridges = @("gpt-bridge", "groq-bridge", "gemini-bridge", "hf-bridge", "openrouter-bridge", "kasa-bridge", "cerebras-bridge")
+$bridges = @("gpt-bridge", "groq-bridge", "gemini-bridge", "hf-bridge", "openrouter-bridge", "kasa-bridge", "cerebras-bridge", "smart-router-bridge")
 $root = $PSScriptRoot
 
 Write-Host ""
@@ -64,7 +64,8 @@ $pairs = @(
     @("hf-bridge",         "hf-bridge"),
     @("openrouter-bridge", "openrouter-bridge"),
     @("kasa-bridge",       "kasa-bridge"),
-    @("cerebras-bridge",   "cerebras-bridge")
+    @("cerebras-bridge",   "cerebras-bridge"),
+    @("smart-router-bridge", "smart-router-bridge")
 )
 foreach ($p in $pairs) {
     $name = $p[0]; $folder = $p[1]
