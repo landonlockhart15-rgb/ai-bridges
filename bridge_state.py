@@ -116,7 +116,8 @@ def mark_unavailable(provider, reason, model=None, cooldown_seconds=None):
         if model is None:
             provider_state.update(update)
         else:
-            provider_state.setdefault("models", {})[model] = update
+            model_state = provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
+            model_state.update(update)
         save_state(state)
 
 
@@ -127,7 +128,8 @@ def mark_available(provider, model=None):
         if model is None:
             provider_state.update({"status": "ok", "reason": None, "cooldown_until": 0})
         else:
-            provider_state.setdefault("models", {})[model] = {"status": "ok", "reason": None, "cooldown_until": 0}
+            model_state = provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
+            model_state.update({"status": "ok", "reason": None, "cooldown_until": 0})
         save_state(state)
 
 
@@ -156,4 +158,45 @@ def raise_if_unavailable(provider, model=None):
     until = _iso_timestamp(float(entry.get("cooldown_until", 0) or 0))
     target = f"{provider}/{model}" if model is not None else provider
     raise ProviderUnavailableError(f"{target} is cooling off until {until}: {entry.get('reason')}")
+
+
+def record_metric(provider, model, latency, success):
+    with SimpleFileLock(LOCK_FILE_PATH):
+        state = load_state()
+        providers = state.setdefault("providers", {})
+        provider_state = providers.setdefault(provider, {"status": "ok", "models": {}})
+        model_state = provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
+        
+        latency_history = model_state.setdefault("latency_history", [])
+        success_history = model_state.setdefault("success_history", [])
+        
+        latency_history.append(latency)
+        success_history.append(1 if success else 0)
+        
+        if len(latency_history) > 10:
+            latency_history.pop(0)
+        if len(success_history) > 10:
+            success_history.pop(0)
+            
+        save_state(state)
+
+
+def get_metrics(provider, model):
+    state = load_state()
+    provider_state = state.get("providers", {}).get(provider, {})
+    model_state = provider_state.get("models", {}).get(model, {})
+    
+    latency_history = model_state.get("latency_history", [])
+    success_history = model_state.get("success_history", [])
+    
+    avg_latency = sum(latency_history) / len(latency_history) if latency_history else 9999.0
+    success_rate = sum(success_history) / len(success_history) if success_history else 1.0
+    
+    return {
+        "avg_latency": avg_latency,
+        "success_rate": success_rate,
+        "latency_history": latency_history,
+        "success_history": success_history,
+    }
+
 

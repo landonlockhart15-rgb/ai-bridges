@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from dataclasses import dataclass
 from typing import Callable, List
 
@@ -104,6 +105,24 @@ def _ask_gemini(prompt: str, route: Route) -> str:
     return response.text
 
 
+def _sort_by_latency_within_tiers(routes: List[Route]) -> List[Route]:
+    from collections import defaultdict
+    tier_order = []
+    routes_by_tier = defaultdict(list)
+    for r in routes:
+        if r.cost_tier not in routes_by_tier:
+            tier_order.append(r.cost_tier)
+        routes_by_tier[r.cost_tier].append(r)
+        
+    sorted_routes = []
+    for tier in tier_order:
+        def sort_key(route):
+            metrics = bridge_state.get_metrics(route.provider, route.model)
+            return (-metrics["success_rate"], metrics["avg_latency"])
+        sorted_routes.extend(sorted(routes_by_tier[tier], key=sort_key))
+    return sorted_routes
+
+
 def _routes_for(task_type: str) -> List[Route]:
     normalized = (task_type or "auto").lower().strip()
     simple_model = "llama-3.1-8b-instant" if normalized in ("simple", "fast", "quick") else "llama-3.3-70b-versatile"
@@ -120,10 +139,13 @@ def _routes_for(task_type: str) -> List[Route]:
     paid_routes = [Route("gpt-bridge", paid_model, "paid", "OPENAI_API_KEY", _ask_gpt)]
 
     if normalized in ("paid", "openai", "gpt"):
-        return paid_routes + free_routes
-    if normalized in ("local", "offline", "private"):
-        return [free_routes[-1]] + free_routes[:-1] + paid_routes
-    return free_routes + paid_routes
+        routes = paid_routes + free_routes
+    elif normalized in ("local", "offline", "private"):
+        routes = [free_routes[-1]] + free_routes[:-1] + paid_routes
+    else:
+        routes = free_routes + paid_routes
+        
+    return _sort_by_latency_within_tiers(routes)
 
 
 def _env_available(route: Route) -> bool:
@@ -163,13 +185,22 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
         if not bridge_state.is_available(route.provider, route.model):
             errors.append(f"{route.provider}/{route.model}: cooling down")
             continue
+        
+        called = False
+        start_time = time.time()
         try:
             usage_tracker.check_budget(route.provider, route.model)
+            called = True
             result = route.ask(prompt, route)
+            latency = time.time() - start_time
+            bridge_state.record_metric(route.provider, route.model, latency, success=True)
             bridge_state.mark_available(route.provider)
             bridge_state.mark_available(route.provider, route.model)
             return result
         except Exception as e:
+            if called:
+                latency = time.time() - start_time
+                bridge_state.record_metric(route.provider, route.model, latency, success=False)
             errors.append(f"{route.provider}/{route.model}: {e.__class__.__name__}: {e}")
             if _is_retryable_error(e) or _should_fallback(e):
                 reason = e.__class__.__name__
