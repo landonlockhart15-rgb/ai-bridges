@@ -1,12 +1,14 @@
 {
   "providers": {
     "groq-bridge": {
+      "consecutive_failures": 0,
       "cooldown_until": 0,
       "models": {
         "llama-3.3-70b-versatile": {
+          "consecutive_failures": 0,
           "cooldown_until": 0,
           "latency_history": [
-            0.0026853084564208984
+            0.004001140594482422
           ],
           "reason": null,
           "status": "ok",

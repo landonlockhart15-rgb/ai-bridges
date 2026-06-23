@@ -283,6 +283,60 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(metrics["avg_latency"], 9999.0)
         self.assertEqual(metrics["success_rate"], 1.0)
 
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_circuit_breaker_requires_repeated_errors_to_trip(self):
+        with patch.dict("os.environ", {"BRIDGE_FAILURE_THRESHOLD": "3"}):
+            MockOpenAI.failing_models = {"llama-3.3-70b-versatile"}
+            
+            # First call: groq fails, fallback to gpt-4o-mini
+            result1 = smart_router.ask_smart("first call", "auto")
+            self.assertEqual(result1, "gpt-4o-mini: first call")
+            
+            # Since threshold is 3, groq-bridge should still be available!
+            self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
+            
+            # Second call: groq fails again, fallback to gpt-4o-mini
+            MockOpenAI.calls = []
+            result2 = smart_router.ask_smart("second call", "auto")
+            self.assertEqual(result2, "gpt-4o-mini: second call")
+            self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
+            
+            # Third call: groq fails a third time, fallback to gpt-4o-mini
+            MockOpenAI.calls = []
+            result3 = smart_router.ask_smart("third call", "auto")
+            self.assertEqual(result3, "gpt-4o-mini: third call")
+            
+            # Now the circuit breaker should have tripped! Groq-bridge is unavailable.
+            self.assertFalse(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
+            
+            # Fourth call: groq-bridge is in cooldown/open state, so it shouldn't even be called!
+            MockOpenAI.calls = []
+            result4 = smart_router.ask_smart("fourth call", "auto")
+            self.assertEqual(result4, "gpt-4o-mini: fourth call")
+            called_models = [call[1] for call in MockOpenAI.calls]
+            self.assertNotIn("llama-3.3-70b-versatile", called_models)
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_circuit_breaker_resets_on_success(self):
+        with patch.dict("os.environ", {"BRIDGE_FAILURE_THRESHOLD": "3"}):
+            MockOpenAI.failing_models = {"llama-3.3-70b-versatile"}
+            
+            # Fail once
+            smart_router.ask_smart("first call", "auto")
+            # Fail twice
+            smart_router.ask_smart("second call", "auto")
+            
+            # Now make it succeed
+            MockOpenAI.failing_models = set()
+            smart_router.ask_smart("third call", "auto")
+            
+            # The count should be reset to 0. Let's make it fail again.
+            MockOpenAI.failing_models = {"llama-3.3-70b-versatile"}
+            smart_router.ask_smart("fourth call", "auto")
+            
+            # Groq-bridge should still be available because the first two failures were reset by success!
+            self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
+
 
 if __name__ == "__main__":
     unittest.main()

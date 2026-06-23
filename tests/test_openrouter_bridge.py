@@ -193,6 +193,26 @@ class TestOpenRouterBridge(unittest.TestCase):
             "Response from google/gemma-4-31b-it:free for User: Hello"
         )
 
+    @patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key', 'BRIDGE_FAILURE_THRESHOLD': '3'})
+    def test_openrouter_circuit_breaker_requires_repeated_errors(self):
+        model_name = "nvidia/nemotron-3-super-120b-a12b:free"
+        
+        # Fail 1st time
+        MockOpenAI.failing_models = {model_name}
+        result1 = openrouter_server.ask_openrouter(prompt="Hello", model=model_name)
+        self.assertEqual(result1, "Response from google/gemma-4-31b-it:free for User: Hello")
+        self.assertTrue(openrouter_server.bridge_state.is_available("openrouter-bridge", model_name))
+        
+        # Fail 2nd time
+        result2 = openrouter_server.ask_openrouter(prompt="Hello", model=model_name)
+        self.assertEqual(result2, "Response from google/gemma-4-31b-it:free for User: Hello")
+        self.assertTrue(openrouter_server.bridge_state.is_available("openrouter-bridge", model_name))
+        
+        # Fail 3rd time
+        result3 = openrouter_server.ask_openrouter(prompt="Hello", model=model_name)
+        self.assertEqual(result3, "Response from google/gemma-4-31b-it:free for User: Hello")
+        self.assertFalse(openrouter_server.bridge_state.is_available("openrouter-bridge", model_name))
+
 
 if __name__ == "__main__":
     unittest.main()

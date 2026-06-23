@@ -204,7 +204,23 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
             errors.append(f"{route.provider}/{route.model}: {e.__class__.__name__}: {e}")
             if _is_retryable_error(e) or _should_fallback(e):
                 reason = e.__class__.__name__
-                bridge_state.mark_unavailable(route.provider, reason, model=route.model)
+                is_429_or_5xx = False
+                api_status_err = getattr(openai, "APIStatusError", None)
+                rate_limit_err = getattr(openai, "RateLimitError", None)
+                if isinstance(api_status_err, type) and isinstance(e, api_status_err):
+                    status_code = getattr(e, "status_code", None)
+                    if status_code == 429 or (status_code and 500 <= status_code < 600):
+                        is_429_or_5xx = True
+                elif isinstance(rate_limit_err, type) and isinstance(e, rate_limit_err):
+                    is_429_or_5xx = True
+                else:
+                    err_msg = str(e).lower()
+                    if "429" in err_msg or "rate limit" in err_msg or "500" in err_msg or "502" in err_msg or "503" in err_msg or "504" in err_msg:
+                        is_429_or_5xx = True
+                    elif "internal server error" in err_msg or "bad gateway" in err_msg or "service unavailable" in err_msg or "gateway timeout" in err_msg:
+                        is_429_or_5xx = True
+                
+                bridge_state.mark_unavailable(route.provider, reason, model=route.model, is_429_or_5xx=is_429_or_5xx)
                 continue
             raise
 

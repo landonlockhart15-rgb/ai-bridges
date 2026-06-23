@@ -66,7 +66,7 @@ def _ask_openrouter_with_fallback(messages: list, model: str) -> str:
             )
             return response.choices[0].message.content
         except openai.RateLimitError as e:
-            bridge_state.mark_unavailable(PROVIDER, "rate_limit", model=current_model)
+            bridge_state.mark_unavailable(PROVIDER, "rate_limit", model=current_model, is_429_or_5xx=True)
             if i < len(available_models) - 1:
                 next_model = available_models[i + 1]
                 print(
@@ -75,11 +75,27 @@ def _ask_openrouter_with_fallback(messages: list, model: str) -> str:
                     file=sys.stderr
                 )
             else:
-                bridge_state.mark_unavailable(PROVIDER, "rate_limit")
+                bridge_state.mark_unavailable(PROVIDER, "rate_limit", is_429_or_5xx=True)
                 raise
         except Exception as e:
-            if e.__class__.__name__ in ("APIConnectionError", "APITimeoutError", "ConnectError", "ReadTimeout"):
-                bridge_state.mark_unavailable(PROVIDER, "connection_error")
+            is_5xx = False
+            api_status_err = getattr(openai, "APIStatusError", None)
+            if isinstance(api_status_err, type) and isinstance(e, api_status_err):
+                status_code = getattr(e, "status_code", None)
+                if status_code and 500 <= status_code < 600:
+                    is_5xx = True
+            else:
+                err_msg = str(e).lower()
+                if "500" in err_msg or "502" in err_msg or "503" in err_msg or "504" in err_msg:
+                    is_5xx = True
+                elif "internal server error" in err_msg or "bad gateway" in err_msg or "service unavailable" in err_msg or "gateway timeout" in err_msg:
+                    is_5xx = True
+
+            if is_5xx:
+                bridge_state.mark_unavailable(PROVIDER, "server_error", model=current_model, is_429_or_5xx=True)
+                bridge_state.mark_unavailable(PROVIDER, "server_error", is_429_or_5xx=True)
+            elif e.__class__.__name__ in ("APIConnectionError", "APITimeoutError", "ConnectError", "ReadTimeout"):
+                bridge_state.mark_unavailable(PROVIDER, "connection_error", is_429_or_5xx=False)
             raise
 
 @mcp.tool()
