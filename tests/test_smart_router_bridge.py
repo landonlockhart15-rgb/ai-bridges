@@ -338,6 +338,41 @@ class TestSmartRouterBridge(unittest.TestCase):
             self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
 
 
+class TestSmartRouterMissingLibraries(unittest.TestCase):
+    def setUp(self):
+        self.sys_modules_backup = sys.modules.copy()
+        
+    def tearDown(self):
+        sys.modules.clear()
+        sys.modules.update(self.sys_modules_backup)
+
+    def test_missing_dependencies_graceful_routing(self):
+        if "openai" in sys.modules:
+            del sys.modules["openai"]
+        if "google" in sys.modules:
+            del sys.modules["google"]
+        if "google.genai" in sys.modules:
+            del sys.modules["google.genai"]
+
+        spec = importlib.util.spec_from_file_location("smart_router_no_libs", ROOT / "smart-router-bridge" / "server.py")
+        router_no_libs = importlib.util.module_from_spec(spec)
+        
+        with patch.dict(sys.modules, {"openai": None, "google": None, "google.genai": None}):
+            spec.loader.exec_module(router_no_libs)
+            
+            self.assertIsNone(router_no_libs.openai)
+            self.assertIsNone(router_no_libs.OpenAI)
+            self.assertIsNone(router_no_libs.genai)
+            
+            routes = router_no_libs._routes_for("auto")
+            for route in routes:
+                self.assertFalse(router_no_libs._library_available(route))
+                
+            with self.assertRaises(router_no_libs.bridge_state.ProviderUnavailableError) as ctx:
+                router_no_libs.ask_smart("hello", "auto")
+            self.assertIn("required library not installed", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
 

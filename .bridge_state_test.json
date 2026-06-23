@@ -8,7 +8,7 @@
           "consecutive_failures": 0,
           "cooldown_until": 0,
           "latency_history": [
-            0.004001140594482422
+            0.004162788391113281
           ],
           "reason": null,
           "status": "ok",

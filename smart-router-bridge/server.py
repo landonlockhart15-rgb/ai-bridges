@@ -5,8 +5,13 @@ from dataclasses import dataclass
 from typing import Callable, List
 
 from mcp.server.fastmcp import FastMCP
-import openai
-from openai import OpenAI
+
+try:
+    import openai
+    from openai import OpenAI
+except Exception:
+    openai = None
+    OpenAI = None
 
 try:
     from google import genai
@@ -32,6 +37,8 @@ class Route:
 
 
 def _openai_client(api_key_env: str, base_url: str | None = None, default_headers: dict | None = None):
+    if OpenAI is None:
+        raise RuntimeError("openai package is not installed")
     api_key = os.environ.get(api_key_env)
     if api_key_env == "OLLAMA_API_KEY":
         api_key = api_key or "ollama"
@@ -154,6 +161,14 @@ def _env_available(route: Route) -> bool:
     return bool(os.environ.get(route.required_env))
 
 
+def _library_available(route: Route) -> bool:
+    if route.ask in (_ask_groq, _ask_cerebras, _ask_openrouter, _ask_hf, _ask_gpt):
+        return OpenAI is not None
+    if route.ask == _ask_gemini:
+        return genai is not None
+    return True
+
+
 def _is_retryable_error(exc: Exception) -> bool:
     retryable_names = {
         "APIConnectionError",
@@ -162,7 +177,8 @@ def _is_retryable_error(exc: Exception) -> bool:
         "ReadTimeout",
         "RateLimitError",
     }
-    return isinstance(exc, getattr(openai, "RateLimitError", tuple())) or exc.__class__.__name__ in retryable_names
+    rate_limit_err = getattr(openai, "RateLimitError", tuple()) if openai is not None else tuple()
+    return isinstance(exc, rate_limit_err) or exc.__class__.__name__ in retryable_names
 
 
 def _should_fallback(exc: Exception) -> bool:
@@ -179,6 +195,9 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
     """
     errors = []
     for route in _routes_for(task_type):
+        if not _library_available(route):
+            errors.append(f"{route.provider}/{route.model}: required library not installed")
+            continue
         if not _env_available(route):
             errors.append(f"{route.provider}/{route.model}: missing {route.required_env}")
             continue
@@ -205,8 +224,8 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
             if _is_retryable_error(e) or _should_fallback(e):
                 reason = e.__class__.__name__
                 is_429_or_5xx = False
-                api_status_err = getattr(openai, "APIStatusError", None)
-                rate_limit_err = getattr(openai, "RateLimitError", None)
+                api_status_err = getattr(openai, "APIStatusError", None) if openai is not None else None
+                rate_limit_err = getattr(openai, "RateLimitError", None) if openai is not None else None
                 if isinstance(api_status_err, type) and isinstance(e, api_status_err):
                     status_code = getattr(e, "status_code", None)
                     if status_code == 429 or (status_code and 500 <= status_code < 600):
