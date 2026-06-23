@@ -96,28 +96,68 @@ def _entry_is_available(entry, now=None):
     return float(entry.get("cooldown_until", 0) or 0) <= now
 
 
-def mark_unavailable(provider, reason, model=None, cooldown_seconds=None):
+def mark_unavailable(provider, reason, model=None, cooldown_seconds=None, is_429_or_5xx=False):
     cooldown_seconds = DEFAULT_COOLDOWN_SECONDS if cooldown_seconds is None else cooldown_seconds
+    threshold = int(os.environ.get("BRIDGE_FAILURE_THRESHOLD", "1" if IS_TEST else "3"))
     now = _now()
     cooldown_until = now + cooldown_seconds
-    update = {
-        "status": "cooldown",
-        "reason": reason,
-        "last_error_at": _iso_timestamp(now),
-        "cooldown_until": cooldown_until,
-    }
-    if model is not None:
-        update["model"] = model
 
     with SimpleFileLock(LOCK_FILE_PATH):
         state = load_state()
         providers = state.setdefault("providers", {})
         provider_state = providers.setdefault(provider, {"status": "ok", "models": {}})
+        
         if model is None:
-            provider_state.update(update)
+            failures = provider_state.get("consecutive_failures", 0)
+            if is_429_or_5xx:
+                failures += 1
+                provider_state["consecutive_failures"] = failures
+                if failures >= threshold:
+                    provider_state.update({
+                        "status": "open",
+                        "reason": reason,
+                        "last_error_at": _iso_timestamp(now),
+                        "cooldown_until": cooldown_until,
+                    })
+                else:
+                    provider_state.update({
+                        "last_error_at": _iso_timestamp(now),
+                        "reason": f"consecutive_failures_count: {failures} | {reason}"
+                    })
+            else:
+                provider_state["consecutive_failures"] = failures + 1
+                provider_state.update({
+                    "status": "open",
+                    "reason": reason,
+                    "last_error_at": _iso_timestamp(now),
+                    "cooldown_until": cooldown_until,
+                })
         else:
             model_state = provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
-            model_state.update(update)
+            failures = model_state.get("consecutive_failures", 0)
+            if is_429_or_5xx:
+                failures += 1
+                model_state["consecutive_failures"] = failures
+                if failures >= threshold:
+                    model_state.update({
+                        "status": "open",
+                        "reason": reason,
+                        "last_error_at": _iso_timestamp(now),
+                        "cooldown_until": cooldown_until,
+                    })
+                else:
+                    model_state.update({
+                        "last_error_at": _iso_timestamp(now),
+                        "reason": f"consecutive_failures_count: {failures} | {reason}"
+                    })
+            else:
+                model_state["consecutive_failures"] = failures + 1
+                model_state.update({
+                    "status": "open",
+                    "reason": reason,
+                    "last_error_at": _iso_timestamp(now),
+                    "cooldown_until": cooldown_until,
+                })
         save_state(state)
 
 
@@ -126,10 +166,20 @@ def mark_available(provider, model=None):
         state = load_state()
         provider_state = state.setdefault("providers", {}).setdefault(provider, {"status": "ok", "models": {}})
         if model is None:
-            provider_state.update({"status": "ok", "reason": None, "cooldown_until": 0})
+            provider_state.update({
+                "status": "ok",
+                "reason": None,
+                "cooldown_until": 0,
+                "consecutive_failures": 0
+            })
         else:
             model_state = provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
-            model_state.update({"status": "ok", "reason": None, "cooldown_until": 0})
+            model_state.update({
+                "status": "ok",
+                "reason": None,
+                "cooldown_until": 0,
+                "consecutive_failures": 0
+            })
         save_state(state)
 
 
