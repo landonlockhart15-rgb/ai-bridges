@@ -283,6 +283,101 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(metrics["avg_latency"], 9999.0)
         self.assertEqual(metrics["success_rate"], 1.0)
 
+    def test_get_provider_metrics_treats_missing_provider_as_empty(self):
+        metrics = smart_router.bridge_state.get_provider_metrics("missing-provider")
+        self.assertEqual(metrics["latency_history"], [])
+        self.assertEqual(metrics["success_history"], [])
+        self.assertEqual(metrics["rate_limit_history"], [])
+        self.assertEqual(metrics["avg_latency"], 9999.0)
+        self.assertEqual(metrics["success_rate"], 1.0)
+
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
+        "SMART_ROUTER_LATENCY_THRESHOLD": "2.0",
+        "SMART_ROUTER_RATE_LIMIT_THRESHOLD": "99",
+    }, clear=True)
+    def test_provider_latency_degradation_is_strict_and_needs_three_samples(self):
+        for _ in range(2):
+            smart_router.bridge_state.record_metric(
+                "groq-bridge",
+                "llama-3.3-70b-versatile",
+                latency=2.0,
+                success=True,
+            )
+
+        health = smart_router.bridge_state.get_route_health("groq-bridge", "llama-3.3-70b-versatile")
+        self.assertFalse(health["provider_is_degraded"])
+
+        smart_router.bridge_state.record_metric(
+            "groq-bridge",
+            "llama-3.3-70b-versatile",
+            latency=2.0,
+            success=True,
+        )
+        health = smart_router.bridge_state.get_route_health("groq-bridge", "llama-3.3-70b-versatile")
+        self.assertFalse(health["provider_is_degraded"])
+
+        smart_router.bridge_state.record_metric(
+            "groq-bridge",
+            "llama-3.3-70b-versatile",
+            latency=2.1,
+            success=True,
+        )
+        health = smart_router.bridge_state.get_route_health("groq-bridge", "llama-3.3-70b-versatile")
+        self.assertTrue(health["provider_is_degraded"])
+
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
+        "SMART_ROUTER_LATENCY_THRESHOLD": "5.0",
+        "SMART_ROUTER_RATE_LIMIT_THRESHOLD": "2",
+    }, clear=True)
+    def test_rate_limit_window_deprioritizes_then_recovers_when_old_samples_roll_off(self):
+        for _ in range(2):
+            smart_router.bridge_state.record_metric(
+                "groq-bridge",
+                "llama-3.3-70b-versatile",
+                latency=0.1,
+                success=False,
+                is_rate_limit=True,
+            )
+        smart_router.bridge_state.record_metric(
+            "gemini-bridge",
+            "gemini-2.5-flash",
+            latency=0.5,
+            success=True,
+        )
+
+        health = smart_router.bridge_state.get_route_health("groq-bridge", "llama-3.3-70b-versatile")
+        self.assertTrue(health["provider_is_degraded"])
+
+        routes = smart_router._routes_for("auto")
+        free_cloud_providers = [r.provider for r in routes if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")]
+        self.assertEqual(free_cloud_providers[0], "gemini-bridge")
+        self.assertEqual(free_cloud_providers[1], "groq-bridge")
+
+        for _ in range(10):
+            smart_router.bridge_state.record_metric(
+                "groq-bridge",
+                "llama-3.3-70b-versatile",
+                latency=0.1,
+                success=True,
+                is_rate_limit=False,
+            )
+
+        provider_metrics = smart_router.bridge_state.get_provider_metrics("groq-bridge")
+        self.assertEqual(len(provider_metrics["rate_limit_history"]), 10)
+        self.assertEqual(sum(provider_metrics["rate_limit_history"]), 0)
+
+        health = smart_router.bridge_state.get_route_health("groq-bridge", "llama-3.3-70b-versatile")
+        self.assertFalse(health["provider_is_degraded"])
+
+        routes = smart_router._routes_for("auto")
+        free_cloud_providers = [r.provider for r in routes if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")]
+        self.assertEqual(free_cloud_providers[0], "groq-bridge")
+        self.assertEqual(free_cloud_providers[1], "gemini-bridge")
+
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
     def test_circuit_breaker_requires_repeated_errors_to_trip(self):
         with patch.dict("os.environ", {"BRIDGE_FAILURE_THRESHOLD": "3"}):
@@ -405,6 +500,59 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual([route.provider for route in none_routes], auto_order)
         self.assertEqual([route.provider for route in empty_routes], auto_order)
         self.assertEqual([route.provider for route in spaced_routes], auto_order)
+
+    def test_provider_level_metric_accumulation(self):
+        provider = "groq-bridge"
+        model1 = "model-1"
+        model2 = "model-2"
+        
+        smart_router.bridge_state.record_metric(provider, model1, latency=1.5, success=True, is_rate_limit=False)
+        smart_router.bridge_state.record_metric(provider, model2, latency=2.5, success=False, is_rate_limit=True)
+        
+        p_metrics = smart_router.bridge_state.get_provider_metrics(provider)
+        self.assertEqual(p_metrics["latency_history"], [1.5, 2.5])
+        self.assertEqual(p_metrics["success_history"], [1, 0])
+        self.assertEqual(p_metrics["rate_limit_history"], [0, 1])
+        self.assertEqual(p_metrics["avg_latency"], 2.0)
+        self.assertEqual(p_metrics["success_rate"], 0.5)
+
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
+        "SMART_ROUTER_LATENCY_THRESHOLD": "2.0",
+        "SMART_ROUTER_RATE_LIMIT_THRESHOLD": "2"
+    }, clear=True)
+    def test_dynamic_deprioritization_due_to_high_latency(self):
+        routes = smart_router._routes_for("auto")
+        self.assertEqual(routes[0].provider, "groq-bridge")
+        
+        for _ in range(3):
+            smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=3.0, success=True)
+            
+        smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=0.5, success=True)
+        
+        routes = smart_router._routes_for("auto")
+        free_cloud_providers = [r.provider for r in routes if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")]
+        self.assertEqual(free_cloud_providers[0], "gemini-bridge")
+        self.assertEqual(free_cloud_providers[1], "groq-bridge")
+
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
+        "SMART_ROUTER_LATENCY_THRESHOLD": "5.0",
+        "SMART_ROUTER_RATE_LIMIT_THRESHOLD": "2"
+    }, clear=True)
+    def test_dynamic_deprioritization_due_to_frequent_429s(self):
+        smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=0.1, success=False, is_rate_limit=True)
+        smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=0.1, success=False, is_rate_limit=True)
+        
+        smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=0.5, success=True)
+        
+        routes = smart_router._routes_for("auto")
+        free_cloud_providers = [r.provider for r in routes if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")]
+        self.assertEqual(free_cloud_providers[0], "gemini-bridge")
+        self.assertEqual(free_cloud_providers[1], "groq-bridge")
+
 
 
 class TestSmartRouterMissingLibraries(unittest.TestCase):
