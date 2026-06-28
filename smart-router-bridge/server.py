@@ -142,14 +142,16 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str) -> List
         is_avail_val = 0 if health["is_available"] else 1
         # 2. Cost tier priority (lower value first)
         cost_prio = _get_cost_priority(route.cost_tier, task_type)
-        # 3. Health: consecutive failures count (lower failures first)
+        # 3. Provider degradation status (healthy first, i.e. 0 for healthy, 1 for degraded)
+        is_degraded = 1 if health.get("provider_is_degraded", False) else 0
+        # 4. Health: consecutive failures count (lower failures first)
         failures = health["consecutive_failures"]
-        # 4. Health: success rate (higher rate first -> negative rate)
+        # 5. Health: success rate (higher rate first -> negative rate)
         neg_success_rate = -health["success_rate"]
-        # 5. Latency (lower latency first)
+        # 6. Latency (lower latency first)
         latency = health["avg_latency"]
 
-        return (is_avail_val, cost_prio, failures, neg_success_rate, latency)
+        return (is_avail_val, cost_prio, is_degraded, failures, neg_success_rate, latency)
 
     return sorted(routes, key=sort_key)
 
@@ -241,28 +243,36 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
             bridge_state.mark_available(route.provider, route.model)
             return result
         except Exception as e:
+            is_429_or_5xx = False
+            is_rate_limit = False
+            api_status_err = getattr(openai, "APIStatusError", None) if openai is not None else None
+            rate_limit_err = getattr(openai, "RateLimitError", None) if openai is not None else None
+            if isinstance(api_status_err, type) and isinstance(e, api_status_err):
+                status_code = getattr(e, "status_code", None)
+                if status_code == 429:
+                    is_rate_limit = True
+                    is_429_or_5xx = True
+                elif status_code and 500 <= status_code < 600:
+                    is_429_or_5xx = True
+            elif isinstance(rate_limit_err, type) and isinstance(e, rate_limit_err):
+                is_rate_limit = True
+                is_429_or_5xx = True
+            else:
+                err_msg = str(e).lower()
+                if "429" in err_msg or "rate limit" in err_msg:
+                    is_rate_limit = True
+                    is_429_or_5xx = True
+                elif "500" in err_msg or "502" in err_msg or "503" in err_msg or "504" in err_msg:
+                    is_429_or_5xx = True
+                elif "internal server error" in err_msg or "bad gateway" in err_msg or "service unavailable" in err_msg or "gateway timeout" in err_msg:
+                    is_429_or_5xx = True
+
             if called:
                 latency = time.time() - start_time
-                bridge_state.record_metric(route.provider, route.model, latency, success=False)
+                bridge_state.record_metric(route.provider, route.model, latency, success=False, is_rate_limit=is_rate_limit)
             errors.append(f"{route.provider}/{route.model}: {e.__class__.__name__}: {e}")
             if _is_retryable_error(e) or _should_fallback(e):
                 reason = e.__class__.__name__
-                is_429_or_5xx = False
-                api_status_err = getattr(openai, "APIStatusError", None) if openai is not None else None
-                rate_limit_err = getattr(openai, "RateLimitError", None) if openai is not None else None
-                if isinstance(api_status_err, type) and isinstance(e, api_status_err):
-                    status_code = getattr(e, "status_code", None)
-                    if status_code == 429 or (status_code and 500 <= status_code < 600):
-                        is_429_or_5xx = True
-                elif isinstance(rate_limit_err, type) and isinstance(e, rate_limit_err):
-                    is_429_or_5xx = True
-                else:
-                    err_msg = str(e).lower()
-                    if "429" in err_msg or "rate limit" in err_msg or "500" in err_msg or "502" in err_msg or "503" in err_msg or "504" in err_msg:
-                        is_429_or_5xx = True
-                    elif "internal server error" in err_msg or "bad gateway" in err_msg or "service unavailable" in err_msg or "gateway timeout" in err_msg:
-                        is_429_or_5xx = True
-                
                 bridge_state.mark_unavailable(route.provider, reason, model=route.model, is_429_or_5xx=is_429_or_5xx)
                 continue
             raise

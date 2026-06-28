@@ -210,7 +210,7 @@ def raise_if_unavailable(provider, model=None):
     raise ProviderUnavailableError(f"{target} is cooling off until {until}: {entry.get('reason')}")
 
 
-def record_metric(provider, model, latency, success):
+def record_metric(provider, model, latency, success, is_rate_limit=False):
     with SimpleFileLock(LOCK_FILE_PATH):
         state = load_state()
         providers = state.setdefault("providers", {})
@@ -227,6 +227,22 @@ def record_metric(provider, model, latency, success):
             latency_history.pop(0)
         if len(success_history) > 10:
             success_history.pop(0)
+
+        # Track at provider level
+        p_latency_history = provider_state.setdefault("latency_history", [])
+        p_success_history = provider_state.setdefault("success_history", [])
+        p_rate_limit_history = provider_state.setdefault("rate_limit_history", [])
+        
+        p_latency_history.append(latency)
+        p_success_history.append(1 if success else 0)
+        p_rate_limit_history.append(1 if is_rate_limit else 0)
+        
+        if len(p_latency_history) > 10:
+            p_latency_history.pop(0)
+        if len(p_success_history) > 10:
+            p_success_history.pop(0)
+        if len(p_rate_limit_history) > 10:
+            p_rate_limit_history.pop(0)
             
         save_state(state)
 
@@ -250,6 +266,26 @@ def get_metrics(provider, model):
     }
 
 
+def get_provider_metrics(provider):
+    state = load_state()
+    provider_state = state.get("providers", {}).get(provider, {})
+    
+    latency_history = provider_state.get("latency_history", [])
+    success_history = provider_state.get("success_history", [])
+    rate_limit_history = provider_state.get("rate_limit_history", [])
+    
+    avg_latency = sum(latency_history) / len(latency_history) if latency_history else 9999.0
+    success_rate = sum(success_history) / len(success_history) if success_history else 1.0
+    
+    return {
+        "avg_latency": avg_latency,
+        "success_rate": success_rate,
+        "latency_history": latency_history,
+        "success_history": success_history,
+        "rate_limit_history": rate_limit_history,
+    }
+
+
 def get_route_health(provider, model):
     """
     Get real-time health metrics for a route (provider + model).
@@ -258,6 +294,9 @@ def get_route_health(provider, model):
       - consecutive_failures (int)
       - success_rate (float)
       - avg_latency (float)
+      - provider_success_rate (float)
+      - provider_avg_latency (float)
+      - provider_is_degraded (bool)
     """
     state = load_state()
     provider_state = state.get("providers", {}).get(provider, {})
@@ -279,11 +318,30 @@ def get_route_health(provider, model):
     avg_latency = sum(latency_history) / len(latency_history) if latency_history else 9999.0
     success_rate = sum(success_history) / len(success_history) if success_history else 1.0
 
+    # Provider level metrics
+    p_latency_history = provider_state.get("latency_history", [])
+    p_success_history = provider_state.get("success_history", [])
+    p_rate_limit_history = provider_state.get("rate_limit_history", [])
+    
+    provider_avg_latency = sum(p_latency_history) / len(p_latency_history) if p_latency_history else 9999.0
+    provider_success_rate = sum(p_success_history) / len(p_success_history) if p_success_history else 1.0
+    provider_rate_limit_count = sum(p_rate_limit_history) if p_rate_limit_history else 0
+    
+    latency_threshold = float(os.environ.get("SMART_ROUTER_LATENCY_THRESHOLD", "5.0"))
+    rate_limit_threshold = int(os.environ.get("SMART_ROUTER_RATE_LIMIT_THRESHOLD", "2"))
+    
+    provider_is_high_latency = len(p_latency_history) >= 3 and provider_avg_latency > latency_threshold
+    provider_is_frequent_429s = provider_rate_limit_count >= rate_limit_threshold
+    provider_is_degraded = provider_is_high_latency or provider_is_frequent_429s
+
     return {
         "is_available": is_avail,
         "consecutive_failures": consecutive_failures,
         "success_rate": success_rate,
         "avg_latency": avg_latency,
+        "provider_success_rate": provider_success_rate,
+        "provider_avg_latency": provider_avg_latency,
+        "provider_is_degraded": provider_is_degraded,
     }
 
 
