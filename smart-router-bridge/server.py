@@ -112,22 +112,46 @@ def _ask_gemini(prompt: str, route: Route) -> str:
     return response.text
 
 
-def _sort_by_latency_within_tiers(routes: List[Route]) -> List[Route]:
-    from collections import defaultdict
-    tier_order = []
-    routes_by_tier = defaultdict(list)
-    for r in routes:
-        if r.cost_tier not in routes_by_tier:
-            tier_order.append(r.cost_tier)
-        routes_by_tier[r.cost_tier].append(r)
-        
-    sorted_routes = []
-    for tier in tier_order:
-        def sort_key(route):
-            metrics = bridge_state.get_metrics(route.provider, route.model)
-            return (-metrics["success_rate"], metrics["avg_latency"])
-        sorted_routes.extend(sorted(routes_by_tier[tier], key=sort_key))
-    return sorted_routes
+def _get_cost_priority(cost_tier: str, task_type: str) -> int:
+    normalized = (task_type or "auto").lower().strip()
+    if normalized in ("paid", "openai", "gpt"):
+        mapping = {
+            "paid": 0,
+            "free-cloud": 1,
+            "local": 2
+        }
+    elif normalized in ("local", "offline", "private"):
+        mapping = {
+            "local": 0,
+            "free-cloud": 1,
+            "paid": 2
+        }
+    else:
+        mapping = {
+            "free-cloud": 0,
+            "local": 1,
+            "paid": 2
+        }
+    return mapping.get(cost_tier, 99)
+
+
+def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str) -> List[Route]:
+    def sort_key(route):
+        health = bridge_state.get_route_health(route.provider, route.model)
+        # 1. Availability status (available first, i.e. 0 for available, 1 for cooling down)
+        is_avail_val = 0 if health["is_available"] else 1
+        # 2. Cost tier priority (lower value first)
+        cost_prio = _get_cost_priority(route.cost_tier, task_type)
+        # 3. Health: consecutive failures count (lower failures first)
+        failures = health["consecutive_failures"]
+        # 4. Health: success rate (higher rate first -> negative rate)
+        neg_success_rate = -health["success_rate"]
+        # 5. Latency (lower latency first)
+        latency = health["avg_latency"]
+
+        return (is_avail_val, cost_prio, failures, neg_success_rate, latency)
+
+    return sorted(routes, key=sort_key)
 
 
 def _routes_for(task_type: str) -> List[Route]:
@@ -151,8 +175,8 @@ def _routes_for(task_type: str) -> List[Route]:
         routes = [free_routes[-1]] + free_routes[:-1] + paid_routes
     else:
         routes = free_routes + paid_routes
-        
-    return _sort_by_latency_within_tiers(routes)
+
+    return _sort_routes_by_cost_and_health(routes, task_type)
 
 
 def _env_available(route: Route) -> bool:

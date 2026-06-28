@@ -337,6 +337,75 @@ class TestSmartRouterBridge(unittest.TestCase):
             # Groq-bridge should still be available because the first two failures were reset by success!
             self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
 
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_dynamic_fallback_chain_health_deprioritization(self):
+        # 1. Initially all are healthy: Free (Groq, Gemini, Cerebras, OpenRouter) -> Local (hf-bridge) -> Paid (gpt-bridge)
+        routes1 = smart_router._routes_for("auto")
+        self.assertEqual(routes1[0].provider, "groq-bridge")
+        self.assertEqual(routes1[4].provider, "hf-bridge")
+        self.assertEqual(routes1[5].provider, "gpt-bridge")
+
+        # 2. Under threshold=3, one failure on groq-bridge degrades its health (consecutive_failures=1) but keeps it available
+        with patch.dict("os.environ", {"BRIDGE_FAILURE_THRESHOLD": "3"}):
+            smart_router.bridge_state.mark_unavailable("groq-bridge", "temporary error", model="llama-3.3-70b-versatile", is_429_or_5xx=True)
+
+            # Now groq-bridge has 1 failure, gemini-bridge has 0 failures.
+            # groq-bridge should be deprioritized within the free-cloud tier. Gemini-bridge is first.
+            routes2 = smart_router._routes_for("auto")
+            self.assertEqual(routes2[0].provider, "gemini-bridge")
+
+            # 3. Mark all free cloud routes as degraded (failures=1)
+            smart_router.bridge_state.mark_unavailable("gemini-bridge", "temporary error", model="gemini-2.5-flash", is_429_or_5xx=True)
+            smart_router.bridge_state.mark_unavailable("cerebras-bridge", "temporary error", model="gpt-oss-120b", is_429_or_5xx=True)
+            smart_router.bridge_state.mark_unavailable("openrouter-bridge", "temporary error", model="nvidia/nemotron-3-super-120b-a12b:free", is_429_or_5xx=True)
+
+            # 4. Now all Free models are degraded (failures=1). Local model (hf-bridge) is healthy (failures=0).
+            # Cost priority is preserved: Free models (even degraded) should be tried before Local models.
+            routes3 = smart_router._routes_for("auto")
+            free_cloud_providers = [r.provider for r in routes3[:4]]
+            self.assertIn("groq-bridge", free_cloud_providers)
+            self.assertEqual(routes3[4].provider, "hf-bridge")
+
+            # 5. Fail groq-bridge 2 more times to trip the circuit breaker (cooldown)
+            smart_router.bridge_state.mark_unavailable("groq-bridge", "temporary error", model="llama-3.3-70b-versatile", is_429_or_5xx=True)
+            smart_router.bridge_state.mark_unavailable("groq-bridge", "temporary error", model="llama-3.3-70b-versatile", is_429_or_5xx=True)
+
+            # Now groq-bridge is unavailable (on cooldown). It must be sorted to the end of the list.
+            routes4 = smart_router._routes_for("auto")
+            self.assertEqual(routes4[-1].provider, "groq-bridge")
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_auto_cost_tier_stays_free_then_local_then_paid_even_with_better_paid_metrics(self):
+        # Give the paid route artificially strong health so the sort key has a chance to mis-rank it.
+        for _ in range(4):
+            smart_router.bridge_state.record_metric("gpt-bridge", "gpt-4o-mini", latency=0.01, success=True)
+
+        # Make one free route look worse and another look better within the free tier.
+        smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=1.5, success=False)
+        smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=0.2, success=True)
+
+        routes = smart_router._routes_for("auto")
+        tiers = [route.cost_tier for route in routes]
+        self.assertEqual(tiers[:4], ["free-cloud", "free-cloud", "free-cloud", "free-cloud"])
+        self.assertEqual(tiers[4], "local")
+        self.assertEqual(tiers[5], "paid")
+
+        free_cloud_routes = [route.provider for route in routes if route.cost_tier == "free-cloud"]
+        self.assertEqual(free_cloud_routes[0], "gemini-bridge")
+        self.assertIn("groq-bridge", free_cloud_routes)
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_empty_and_whitespace_task_types_default_to_auto_cost_order(self):
+        auto_routes = smart_router._routes_for("auto")
+        none_routes = smart_router._routes_for(None)
+        empty_routes = smart_router._routes_for("")
+        spaced_routes = smart_router._routes_for("   AuTo   ")
+
+        auto_order = [route.provider for route in auto_routes]
+        self.assertEqual([route.provider for route in none_routes], auto_order)
+        self.assertEqual([route.provider for route in empty_routes], auto_order)
+        self.assertEqual([route.provider for route in spaced_routes], auto_order)
+
 
 class TestSmartRouterMissingLibraries(unittest.TestCase):
     def setUp(self):
