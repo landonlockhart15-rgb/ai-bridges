@@ -250,3 +250,41 @@ def get_metrics(provider, model):
     }
 
 
+def get_route_health(provider, model):
+    """
+    Get real-time health metrics for a route (provider + model).
+    Returns a dict with:
+      - is_available (bool)
+      - consecutive_failures (int)
+      - success_rate (float)
+      - avg_latency (float)
+    """
+    state = load_state()
+    provider_state = state.get("providers", {}).get(provider, {})
+    model_state = provider_state.get("models", {}).get(model, {})
+
+    # Check availability
+    provider_avail = _entry_is_available(provider_state)
+    model_avail = _entry_is_available(model_state)
+    is_avail = provider_avail and model_avail
+
+    # Get consecutive failures
+    provider_failures = provider_state.get("consecutive_failures", 0)
+    model_failures = model_state.get("consecutive_failures", 0)
+    consecutive_failures = max(provider_failures, model_failures)
+
+    # Get success rate and latency
+    latency_history = model_state.get("latency_history", [])
+    success_history = model_state.get("success_history", [])
+    avg_latency = sum(latency_history) / len(latency_history) if latency_history else 9999.0
+    success_rate = sum(success_history) / len(success_history) if success_history else 1.0
+
+    return {
+        "is_available": is_avail,
+        "consecutive_failures": consecutive_failures,
+        "success_rate": success_rate,
+        "avg_latency": avg_latency,
+    }
+
+
+
