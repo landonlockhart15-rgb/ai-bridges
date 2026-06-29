@@ -4,14 +4,14 @@
       "consecutive_failures": 0,
       "cooldown_until": 0,
       "latency_history": [
-        0.004038810729980469
+        0.021001338958740234
       ],
       "models": {
         "llama-3.3-70b-versatile": {
           "consecutive_failures": 0,
           "cooldown_until": 0,
           "latency_history": [
-            0.004038810729980469
+            0.021001338958740234
           ],
           "reason": null,
           "status": "ok",

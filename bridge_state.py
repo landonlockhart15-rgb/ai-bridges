@@ -20,21 +20,32 @@ class SimpleFileLock:
         self.lock_file_path = lock_file_path
         self.timeout = timeout
         self.is_locked = False
+        import uuid
+        self.owner_id = uuid.uuid4().hex
 
     def __enter__(self):
         start_time = time.time()
+        import uuid
         while time.time() - start_time < self.timeout:
             try:
                 fd = os.open(self.lock_file_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
+                try:
+                    os.write(fd, self.owner_id.encode("utf-8"))
+                finally:
+                    os.close(fd)
                 self.is_locked = True
                 return self
             except FileExistsError:
                 try:
                     mtime = os.path.getmtime(self.lock_file_path)
                     if time.time() - mtime > 10.0:
+                        stale_path = self.lock_file_path + f".stale.{uuid.uuid4().hex}"
                         try:
-                            os.remove(self.lock_file_path)
+                            os.rename(self.lock_file_path, stale_path)
+                            try:
+                                os.remove(stale_path)
+                            except OSError:
+                                pass
                         except OSError:
                             pass
                 except OSError:
@@ -45,7 +56,31 @@ class SimpleFileLock:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.is_locked:
             try:
-                os.remove(self.lock_file_path)
+                try:
+                    with open(self.lock_file_path, "r", encoding="utf-8") as f:
+                        owner = f.read().strip()
+                except Exception:
+                    owner = None
+                
+                if owner == self.owner_id:
+                    release_path = self.lock_file_path + f".release.{self.owner_id}"
+                    try:
+                        os.rename(self.lock_file_path, release_path)
+                        try:
+                            with open(release_path, "r", encoding="utf-8") as f:
+                                verified_owner = f.read().strip()
+                        except Exception:
+                            verified_owner = None
+                        
+                        if verified_owner == self.owner_id:
+                            os.remove(release_path)
+                        else:
+                            try:
+                                os.rename(release_path, self.lock_file_path)
+                            except OSError:
+                                pass
+                    except OSError:
+                        pass
             except OSError:
                 pass
 
