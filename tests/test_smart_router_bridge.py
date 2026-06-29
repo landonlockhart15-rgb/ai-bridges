@@ -221,6 +221,27 @@ class TestSmartRouterBridge(unittest.TestCase):
             if lock_file.exists():
                 lock_file.unlink()
 
+    def test_lock_release_race_preserves_reacquired_lock(self):
+        lock_file = Path(smart_router.bridge_state.LOCK_FILE_PATH)
+        lock1 = smart_router.bridge_state.SimpleFileLock(str(lock_file))
+        lock2 = smart_router.bridge_state.SimpleFileLock(str(lock_file))
+
+        lock1.__enter__()
+        self.assertTrue(lock_file.exists())
+
+        original_rename = smart_router.bridge_state.os.rename
+
+        def raced_rename(src, dst):
+            if src == str(lock_file) and dst == f"{lock_file}.release.{lock1.owner_id}":
+                lock_file.write_text(lock2.owner_id, encoding="utf-8")
+            return original_rename(src, dst)
+
+        with patch.object(smart_router.bridge_state.os, "rename", side_effect=raced_rename):
+            lock1.__exit__(None, None, None)
+
+        self.assertTrue(lock_file.exists())
+        self.assertEqual(lock_file.read_text(encoding="utf-8").strip(), lock2.owner_id)
+
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key"}, clear=True)
     def test_dynamic_latency_routing_prioritizes_faster_bridge(self):
         # 1. No metrics initially: groq-bridge is first in tier because of default definition order
