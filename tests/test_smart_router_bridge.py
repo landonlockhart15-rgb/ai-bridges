@@ -297,6 +297,52 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(metrics["success_rate"], 0.7)
         self.assertEqual(metrics["avg_latency"], 6.5)
 
+    def test_record_metric_trims_pre_existing_overflow_without_reordering(self):
+        # Seed distinct values so we can prove the newest 10 survive in order.
+        provider = "excess-provider"
+        model = "excess-model"
+
+        model_latency_history = [float(i) for i in range(15)]
+        model_success_history = [i % 2 for i in range(15)]
+        provider_latency_history = [float(100 + i) for i in range(15)]
+        provider_success_history = [(i + 1) % 2 for i in range(15)]
+        provider_rate_limit_history = [1 if i in (2, 5, 8, 11, 14) else 0 for i in range(15)]
+
+        with smart_router.bridge_state.SimpleFileLock(smart_router.bridge_state.LOCK_FILE_PATH):
+            state = smart_router.bridge_state.load_state()
+            providers = state.setdefault("providers", {})
+            provider_state = providers.setdefault(provider, {"status": "ok", "models": {}})
+            model_state = provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
+            model_state["latency_history"] = model_latency_history[:]
+            model_state["success_history"] = model_success_history[:]
+
+            provider_state["latency_history"] = provider_latency_history[:]
+            provider_state["success_history"] = provider_success_history[:]
+            provider_state["rate_limit_history"] = provider_rate_limit_history[:]
+            smart_router.bridge_state.save_state(state)
+
+        new_latency = 99.5
+        smart_router.bridge_state.record_metric(provider, model, latency=new_latency, success=False, is_rate_limit=True)
+
+        expected_model_latency = model_latency_history[6:] + [new_latency]
+        expected_model_success = model_success_history[6:] + [0]
+        expected_provider_latency = provider_latency_history[6:] + [new_latency]
+        expected_provider_success = provider_success_history[6:] + [0]
+        expected_rate_limit_history = provider_rate_limit_history[6:] + [1]
+
+        metrics = smart_router.bridge_state.get_metrics(provider, model)
+        self.assertEqual(metrics["latency_history"], expected_model_latency)
+        self.assertEqual(metrics["success_history"], expected_model_success)
+        self.assertEqual(metrics["avg_latency"], sum(expected_model_latency) / 10)
+        self.assertEqual(metrics["success_rate"], sum(expected_model_success) / 10)
+
+        p_metrics = smart_router.bridge_state.get_provider_metrics(provider)
+        self.assertEqual(p_metrics["latency_history"], expected_provider_latency)
+        self.assertEqual(p_metrics["success_history"], expected_provider_success)
+        self.assertEqual(p_metrics["rate_limit_history"], expected_rate_limit_history)
+        self.assertEqual(p_metrics["avg_latency"], sum(expected_provider_latency) / 10)
+        self.assertEqual(p_metrics["success_rate"], sum(expected_provider_success) / 10)
+
     def test_get_metrics_treats_missing_model_as_unseen_and_reliable_but_slow(self):
         metrics = smart_router.bridge_state.get_metrics("missing-provider", "missing-model")
         self.assertEqual(metrics["latency_history"], [])
