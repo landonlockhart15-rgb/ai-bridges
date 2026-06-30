@@ -192,7 +192,16 @@ def _routes_for(task_type: str) -> List[Route]:
 
     if normalized in CAPABILITY_TASK_TYPES:
         capable_routes = [r for r in routes if normalized in r.capabilities]
-        if capable_routes:
+        # Only restrict to capable_routes if at least one capable free/local route is fully available.
+        # Otherwise, keep non-capable free/local routes in the list as fallback before using paid GPT.
+        has_available_capable_free = any(
+            r.cost_tier != "paid" and
+            _library_available(r) and
+            _env_available(r) and
+            bridge_state.is_available(r.provider, r.model)
+            for r in capable_routes
+        )
+        if has_available_capable_free:
             routes = capable_routes
 
     return _sort_routes_by_cost_and_health(routes, task_type)

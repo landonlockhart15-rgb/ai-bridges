@@ -671,6 +671,34 @@ class TestSmartRouterBridge(unittest.TestCase):
         routes = smart_router._routes_for("auto")
         self.assertEqual(len(routes), 6)
 
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "OPENAI_API_KEY": "paid-key",
+    }, clear=True)
+    def test_creative_writing_fallback_when_gemini_missing_env(self):
+        # GEMINI_API_KEY is not set, so gemini-bridge is not available.
+        # It should fall back to other free/local routes like groq-bridge first, then paid gpt-bridge.
+        routes = smart_router._routes_for("creative_writing")
+        providers = [r.provider for r in routes]
+        self.assertIn("groq-bridge", providers)
+        self.assertEqual(providers[-1], "gpt-bridge")
+
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
+        "OPENAI_API_KEY": "paid-key",
+    }, clear=True)
+    def test_creative_writing_fallback_when_gemini_cooling_down(self):
+        # Mark gemini-bridge as unavailable (cooling down)
+        smart_router.bridge_state.mark_unavailable("gemini-bridge", "429", model="gemini-2.5-flash")
+        
+        # It should fall back to other free/local routes like groq-bridge first, then paid gpt-bridge.
+        routes = smart_router._routes_for("creative_writing")
+        providers = [r.provider for r in routes]
+        self.assertIn("groq-bridge", providers)
+        self.assertLess(providers.index("groq-bridge"), providers.index("gpt-bridge"))
+        self.assertGreater(providers.index("gemini-bridge"), providers.index("gpt-bridge"))
+
 
 class TestSmartRouterMissingLibraries(unittest.TestCase):
     def setUp(self):
