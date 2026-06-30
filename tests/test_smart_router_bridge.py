@@ -540,6 +540,70 @@ class TestSmartRouterBridge(unittest.TestCase):
     @patch.dict("os.environ", {
         "GROQ_API_KEY": "gsk_test_key",
         "GEMINI_API_KEY": "gemini-key",
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+    }, clear=True)
+    def test_latency_window_recovery_rolls_off_old_slow_samples(self):
+        for _ in range(3):
+            smart_router.bridge_state.record_metric(
+                "groq-bridge",
+                "llama-3.3-70b-versatile",
+                latency=3.0,
+                success=True,
+            )
+
+        smart_router.bridge_state.record_metric(
+            "gemini-bridge",
+            "gemini-2.5-flash",
+            latency=0.5,
+            success=True,
+        )
+
+        pre_recovery_routes = smart_router._routes_for("auto")
+        pre_recovery_free = [
+            r.provider for r in pre_recovery_routes
+            if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")
+        ]
+        self.assertEqual(pre_recovery_free[0], "gemini-bridge")
+        self.assertEqual(pre_recovery_free[1], "groq-bridge")
+
+        for _ in range(10):
+            smart_router.bridge_state.record_metric(
+                "groq-bridge",
+                "llama-3.3-70b-versatile",
+                latency=0.1,
+                success=True,
+            )
+
+        health = smart_router.bridge_state.get_route_health("groq-bridge", "llama-3.3-70b-versatile")
+        self.assertFalse(health["provider_is_degraded"])
+        self.assertLess(health["provider_avg_latency"], 1.0)
+        self.assertEqual(health["success_rate"], 1.0)
+
+        post_recovery_routes = smart_router._routes_for("auto")
+        post_recovery_free = [
+            r.provider for r in post_recovery_routes
+            if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")
+        ]
+        self.assertEqual(post_recovery_free[0], "groq-bridge")
+        self.assertEqual(post_recovery_free[1], "gemini-bridge")
+
+    def test_malformed_state_file_falls_back_to_empty_state(self):
+        state_path = Path(smart_router.bridge_state.STATE_FILE_PATH)
+        state_path.write_text("{ not valid json", encoding="utf-8")
+
+        state = smart_router.bridge_state.load_state()
+        self.assertEqual(state, {"version": 1, "providers": {}})
+
+        health = smart_router.bridge_state.get_route_health("groq-bridge", "llama-3.3-70b-versatile")
+        self.assertTrue(health["is_available"])
+        self.assertEqual(health["consecutive_failures"], 0)
+        self.assertEqual(health["success_rate"], 1.0)
+        self.assertEqual(health["avg_latency"], 9999.0)
+        self.assertFalse(health["provider_is_degraded"])
+
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
         "SMART_ROUTER_LATENCY_THRESHOLD": "2.0",
         "SMART_ROUTER_RATE_LIMIT_THRESHOLD": "2"
     }, clear=True)
