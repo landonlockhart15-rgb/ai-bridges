@@ -259,9 +259,9 @@ def record_metric(provider, model, latency, success, is_rate_limit=False):
         success_history.append(1 if success else 0)
         
         if len(latency_history) > 10:
-            latency_history.pop(0)
+            latency_history[:] = latency_history[-10:]
         if len(success_history) > 10:
-            success_history.pop(0)
+            success_history[:] = success_history[-10:]
 
         # Track at provider level
         p_latency_history = provider_state.setdefault("latency_history", [])
@@ -273,11 +273,11 @@ def record_metric(provider, model, latency, success, is_rate_limit=False):
         p_rate_limit_history.append(1 if is_rate_limit else 0)
         
         if len(p_latency_history) > 10:
-            p_latency_history.pop(0)
+            p_latency_history[:] = p_latency_history[-10:]
         if len(p_success_history) > 10:
-            p_success_history.pop(0)
+            p_success_history[:] = p_success_history[-10:]
         if len(p_rate_limit_history) > 10:
-            p_rate_limit_history.pop(0)
+            p_rate_limit_history[:] = p_rate_limit_history[-10:]
             
         save_state(state)
 
