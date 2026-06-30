@@ -34,6 +34,12 @@ class Route:
     cost_tier: str
     required_env: str | None
     ask: Callable[..., str]
+    capabilities: tuple[str, ...] = ()
+
+
+# Capability tags per route, used to filter candidates for capability-aware
+# task types (e.g. task_type="coding") before applying cost/health ordering.
+CAPABILITY_TASK_TYPES = {"coding", "creative_writing", "simple_extraction"}
 
 
 def _openai_client(api_key_env: str, base_url: str | None = None, default_headers: dict | None = None):
@@ -163,13 +169,19 @@ def _routes_for(task_type: str) -> List[Route]:
     paid_model = os.environ.get("SMART_ROUTER_PAID_MODEL", "gpt-4o-mini")
 
     free_routes = [
-        Route("groq-bridge", simple_model, "free-cloud", "GROQ_API_KEY", _ask_groq),
-        Route("gemini-bridge", "gemini-2.5-flash", "free-cloud", "GEMINI_API_KEY", _ask_gemini),
-        Route("cerebras-bridge", "gpt-oss-120b", "free-cloud", "CEREBRAS_API_KEY", _ask_cerebras),
-        Route("openrouter-bridge", "nvidia/nemotron-3-super-120b-a12b:free", "free-cloud", "OPENROUTER_API_KEY", _ask_openrouter),
-        Route("hf-bridge", local_model, "local", None, _ask_hf),
+        Route("groq-bridge", simple_model, "free-cloud", "GROQ_API_KEY", _ask_groq,
+              ("coding", "general", "simple_extraction")),
+        Route("gemini-bridge", "gemini-2.5-flash", "free-cloud", "GEMINI_API_KEY", _ask_gemini,
+              ("coding", "creative_writing", "general")),
+        Route("cerebras-bridge", "gpt-oss-120b", "free-cloud", "CEREBRAS_API_KEY", _ask_cerebras,
+              ("coding", "general")),
+        Route("openrouter-bridge", "nvidia/nemotron-3-super-120b-a12b:free", "free-cloud", "OPENROUTER_API_KEY", _ask_openrouter,
+              ("general", "simple_extraction")),
+        Route("hf-bridge", local_model, "local", None, _ask_hf,
+              ("general", "simple_extraction")),
     ]
-    paid_routes = [Route("gpt-bridge", paid_model, "paid", "OPENAI_API_KEY", _ask_gpt)]
+    paid_routes = [Route("gpt-bridge", paid_model, "paid", "OPENAI_API_KEY", _ask_gpt,
+                          ("coding", "creative_writing", "general", "simple_extraction"))]
 
     if normalized in ("paid", "openai", "gpt"):
         routes = paid_routes + free_routes
@@ -177,6 +189,20 @@ def _routes_for(task_type: str) -> List[Route]:
         routes = [free_routes[-1]] + free_routes[:-1] + paid_routes
     else:
         routes = free_routes + paid_routes
+
+    if normalized in CAPABILITY_TASK_TYPES:
+        capable_routes = [r for r in routes if normalized in r.capabilities]
+        # Only restrict to capable_routes if at least one capable free/local route is fully available.
+        # Otherwise, keep non-capable free/local routes in the list as fallback before using paid GPT.
+        has_available_capable_free = any(
+            r.cost_tier != "paid" and
+            _library_available(r) and
+            _env_available(r) and
+            bridge_state.is_available(r.provider, r.model)
+            for r in capable_routes
+        )
+        if has_available_capable_free:
+            routes = capable_routes
 
     return _sort_routes_by_cost_and_health(routes, task_type)
 
