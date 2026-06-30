@@ -638,6 +638,38 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(free_cloud_providers[0], "gemini-bridge")
         self.assertEqual(free_cloud_providers[1], "groq-bridge")
 
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
+        "OPENAI_API_KEY": "paid-key",
+    }, clear=True)
+    def test_capability_task_type_filters_to_capable_routes_only(self):
+        routes = smart_router._routes_for("creative_writing")
+        providers = [r.provider for r in routes]
+        # Only gemini-bridge and gpt-bridge are tagged with creative_writing.
+        self.assertEqual(set(providers), {"gemini-bridge", "gpt-bridge"})
+        # Cost ordering is still respected: free before paid.
+        self.assertEqual(providers[0], "gemini-bridge")
+        self.assertEqual(providers[-1], "gpt-bridge")
+
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
+        "OPENAI_API_KEY": "paid-key",
+    }, clear=True)
+    def test_simple_extraction_capability_excludes_gemini_and_cerebras(self):
+        routes = smart_router._routes_for("simple_extraction")
+        providers = {r.provider for r in routes}
+        self.assertIn("groq-bridge", providers)
+        self.assertIn("gpt-bridge", providers)
+        self.assertNotIn("gemini-bridge", providers)
+        self.assertNotIn("cerebras-bridge", providers)
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
+    def test_unrecognized_task_type_is_unaffected_by_capability_filtering(self):
+        # "auto" is not a capability task type, so all routes remain candidates.
+        routes = smart_router._routes_for("auto")
+        self.assertEqual(len(routes), 6)
 
 
 class TestSmartRouterMissingLibraries(unittest.TestCase):
