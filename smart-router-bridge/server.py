@@ -40,6 +40,33 @@ class Route:
 # Capability tags per route, used to filter candidates for capability-aware
 # task types (e.g. task_type="coding") before applying cost/health ordering.
 CAPABILITY_TASK_TYPES = {"coding", "creative_writing", "simple_extraction"}
+SIMPLE_INTENT_KEYWORDS = (
+    "summary",
+    "summarize",
+    "extract",
+    "bullet",
+    "rewrite",
+    "translate",
+    "proofread",
+    "typo",
+    "title",
+    "format",
+    "brief",
+)
+COMPLEX_INTENT_KEYWORDS = (
+    "refactor",
+    "architecture",
+    "design",
+    "debug",
+    "implement",
+    "migrate",
+    "optimize",
+    "build",
+    "plan",
+    "analyze",
+    "comparison",
+    "multi-step",
+)
 
 
 def _openai_client(api_key_env: str, base_url: str | None = None, default_headers: dict | None = None):
@@ -118,8 +145,21 @@ def _ask_gemini(prompt: str, route: Route) -> str:
     return response.text
 
 
-def _get_cost_priority(cost_tier: str, task_type: str) -> int:
+def _task_complexity(prompt: str) -> str:
+    normalized = (prompt or "").lower().strip()
+    word_count = len(normalized.split())
+    if not normalized:
+        return "medium"
+    if word_count >= 180 or any(keyword in normalized for keyword in COMPLEX_INTENT_KEYWORDS):
+        return "complex"
+    if word_count <= 40 and any(keyword in normalized for keyword in SIMPLE_INTENT_KEYWORDS):
+        return "simple"
+    return "medium"
+
+
+def _get_cost_priority(cost_tier: str, task_type: str, prompt: str | None = None) -> int:
     normalized = (task_type or "auto").lower().strip()
+    complexity = _task_complexity(prompt or "") if normalized == "auto" else "medium"
     if normalized in ("paid", "openai", "gpt"):
         mapping = {
             "paid": 0,
@@ -133,21 +173,28 @@ def _get_cost_priority(cost_tier: str, task_type: str) -> int:
             "paid": 2
         }
     else:
-        mapping = {
-            "free-cloud": 0,
-            "local": 1,
-            "paid": 2
-        }
+        if complexity == "simple":
+            mapping = {
+                "local": 0,
+                "free-cloud": 1,
+                "paid": 2,
+            }
+        else:
+            mapping = {
+                "free-cloud": 0,
+                "local": 1,
+                "paid": 2,
+            }
     return mapping.get(cost_tier, 99)
 
 
-def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str) -> List[Route]:
+def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt: str | None = None) -> List[Route]:
     def sort_key(route):
         health = bridge_state.get_route_health(route.provider, route.model)
         # 1. Availability status (available first, i.e. 0 for available, 1 for cooling down)
         is_avail_val = 0 if health["is_available"] else 1
         # 2. Cost tier priority (lower value first)
-        cost_prio = _get_cost_priority(route.cost_tier, task_type)
+        cost_prio = _get_cost_priority(route.cost_tier, task_type, prompt)
         # 3. Provider degradation status (healthy first, i.e. 0 for healthy, 1 for degraded)
         is_degraded = 1 if health.get("provider_is_degraded", False) else 0
         # 4. Health: consecutive failures count (lower failures first)
@@ -162,7 +209,7 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str) -> List
     return sorted(routes, key=sort_key)
 
 
-def _routes_for(task_type: str) -> List[Route]:
+def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
     normalized = (task_type or "auto").lower().strip()
     simple_model = "llama-3.1-8b-instant" if normalized in ("simple", "fast", "quick") else "llama-3.3-70b-versatile"
     local_model = os.environ.get("SMART_ROUTER_LOCAL_MODEL", "gemma4:latest")
@@ -204,7 +251,7 @@ def _routes_for(task_type: str) -> List[Route]:
         if has_available_capable_free:
             routes = capable_routes
 
-    return _sort_routes_by_cost_and_health(routes, task_type)
+    return _sort_routes_by_cost_and_health(routes, task_type, prompt)
 
 
 def _env_available(route: Route) -> bool:
@@ -246,7 +293,7 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
     before using GPT as the paid last resort. Use task_type='paid' to request GPT first.
     """
     errors = []
-    for route in _routes_for(task_type):
+    for route in _routes_for(task_type, prompt):
         if not _library_available(route):
             errors.append(f"{route.provider}/{route.model}: required library not installed")
             continue

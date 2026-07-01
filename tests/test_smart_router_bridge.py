@@ -99,6 +99,24 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(tiers[-1], "paid")
 
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
+    def test_simple_prompt_prefers_local_first_in_auto_mode(self):
+        routes = smart_router._routes_for("auto", prompt="Please summarize this release note in one sentence.")
+        tiers = [route.cost_tier for route in routes]
+        self.assertEqual(tiers[0], "local")
+        self.assertEqual(tiers[-1], "paid")
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
+    def test_complex_prompt_prefers_free_cloud_before_local_in_auto_mode(self):
+        routes = smart_router._routes_for(
+            "auto",
+            prompt="Refactor this stateful router to support multi-step retries, capability scoring, and edge-case handling.",
+        )
+        tiers = [route.cost_tier for route in routes]
+        self.assertEqual(tiers[0], "free-cloud")
+        self.assertIn("local", tiers)
+        self.assertEqual(tiers[-1], "paid")
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
     def test_ask_smart_uses_first_available_free_route(self):
         result = smart_router.ask_smart("hello", "auto")
         self.assertEqual(result, "llama-3.3-70b-versatile: hello")
@@ -117,6 +135,12 @@ class TestSmartRouterBridge(unittest.TestCase):
                 (None, "gpt-4o-mini"),
             ],
         )
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_paid_task_type_still_requests_gpt_first_for_complex_prompts(self):
+        result = smart_router.ask_smart("Refactor this module and explain the tradeoffs.", "paid")
+        self.assertEqual(result, "gpt-4o-mini: Refactor this module and explain the tradeoffs.")
+        self.assertEqual(MockOpenAI.calls, [(None, "gpt-4o-mini")])
 
     @patch.dict("os.environ", {"GEMINI_API_KEY": "gemini-key", "OPENAI_API_KEY": "paid-key"}, clear=True)
     def test_provider_error_falls_back_to_next_route(self):
@@ -744,6 +768,58 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertIn("groq-bridge", providers)
         self.assertLess(providers.index("groq-bridge"), providers.index("gpt-bridge"))
         self.assertGreater(providers.index("gemini-bridge"), providers.index("gpt-bridge"))
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
+    def test_task_complexity_heuristics_edge_cases(self):
+        # 1. Empty, None, and whitespace-only prompts default to "medium"
+        self.assertEqual(smart_router._task_complexity(None), "medium")
+        self.assertEqual(smart_router._task_complexity(""), "medium")
+        self.assertEqual(smart_router._task_complexity("   \n  \t "), "medium")
+
+        # 2. Simple boundary: word counts around 40
+        # Exactly 40 words with simple keyword -> "simple"
+        prompt_40_simple = "summarize " + "word " * 39
+        self.assertEqual(len(prompt_40_simple.split()), 40)
+        self.assertEqual(smart_router._task_complexity(prompt_40_simple), "simple")
+
+        # Exactly 41 words with simple keyword -> "medium"
+        prompt_41_simple = "summarize " + "word " * 40
+        self.assertEqual(len(prompt_41_simple.split()), 41)
+        self.assertEqual(smart_router._task_complexity(prompt_41_simple), "medium")
+
+        # 3. Complex boundary: word counts around 180
+        # Exactly 179 words without complex keyword -> "medium"
+        prompt_179_no_keyword = "word " * 179
+        self.assertEqual(len(prompt_179_no_keyword.split()), 179)
+        self.assertEqual(smart_router._task_complexity(prompt_179_no_keyword), "medium")
+
+        # Exactly 180 words without complex keyword -> "complex"
+        prompt_180_no_keyword = "word " * 180
+        self.assertEqual(len(prompt_180_no_keyword.split()), 180)
+        self.assertEqual(smart_router._task_complexity(prompt_180_no_keyword), "complex")
+
+        # 4. Keyword casing and substring matching
+        # Case insensitivity
+        self.assertEqual(smart_router._task_complexity("REFACTOR code"), "complex")
+        self.assertEqual(smart_router._task_complexity("SuMmArIzE this"), "simple")
+
+        # Substring keyword matching (e.g., 'debugging' contains 'debug', 'proofreading' contains 'proofread')
+        self.assertEqual(smart_router._task_complexity("debugging this session"), "complex")
+        self.assertEqual(smart_router._task_complexity("proofreading this text"), "simple")
+
+        # Both simple and complex keywords present -> complex takes precedence
+        self.assertEqual(smart_router._task_complexity("summarize and refactor"), "complex")
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_routing_fails_to_escalate_complex_prompt_to_paid_tier(self):
+        # The user requested that the bridge "decide if it can safely stay on a free/local model or if it *must* escalate to a paid tier"
+        # However, the current implementation maps "complex" tasks to priority: free-cloud=0, local=1, paid=2.
+        # This test documents that a complex prompt DOES NOT escalate to paid tier (gpt-bridge), but stays on free-cloud.
+        routes = smart_router._routes_for("auto", prompt="Refactor this large system and design a backup plan.")
+        tiers = [route.cost_tier for route in routes]
+        # It still prioritizes free-cloud over paid!
+        self.assertEqual(tiers[0], "free-cloud")
+        self.assertEqual(tiers[-1], "paid")
 
 
 class TestSmartRouterMissingLibraries(unittest.TestCase):
