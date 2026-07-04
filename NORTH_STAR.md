@@ -33,7 +33,9 @@ local → paid last**.
 ## Build toward
 More resilient fallback and routing, better cost/latency awareness, cleaner
 provider abstractions, clearer diagnostics when a bridge is down. Capability that
-makes delegating to the right free model effortless and dependable.
+makes delegating to the right free model effortless and dependable. There is
+no size ceiling — a small fallback-chain fix and a genuinely new bridge or
+routing capability are both in scope, judged only on reliability and value.
 
 ## Do NOT
 - Break the cost hierarchy or quietly route to paid models when a free or local
