@@ -8,6 +8,9 @@ import urllib.error
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
+IS_TEST = "unittest" in sys.modules or "pytest" in sys.modules or os.environ.get("BRIDGE_TESTING") == "1"
+
+
 def encrypt_kasa(string):
     """Simple XOR encryption used by Kasa devices for discovery."""
     key = 171
@@ -313,6 +316,28 @@ def check_bridges() -> str:
             for b_id, _ in bridges
         ]
         results = [f.result() for f in futures]
+
+    # Write to status cache
+    try:
+        cache_filename = ".bridge_status_test.json" if IS_TEST else ".bridge_status.json"
+        cache_path = Path(__file__).resolve().parent / cache_filename
+        temp_path = cache_path.with_suffix(".json.tmp")
+        cache_data = {
+            "timestamp": time.time(),
+            "bridges": {res["id"]: res for res in results}
+        }
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, indent=2, sort_keys=True)
+        if cache_path.exists():
+            cache_path.unlink()
+        temp_path.rename(cache_path)
+    except Exception:
+        # Fallback to direct write
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, indent=2, sort_keys=True)
+        except Exception:
+            pass
         
     # Build clean, high-aesthetic markdown report
     md = []

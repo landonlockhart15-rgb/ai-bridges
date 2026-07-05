@@ -9,10 +9,17 @@ class MockFastMCP:
     def __init__(self, name):
         self.name = name
         self.tools = {}
+        self.resources = {}
 
     def tool(self, *args, **kwargs):
         def decorator(func):
             self.tools[func.__name__] = func
+            return func
+        return decorator
+
+    def resource(self, *args, **kwargs):
+        def decorator(func):
+            self.resources[func.__name__] = func
             return func
         return decorator
 
@@ -473,28 +480,28 @@ class TestSmartRouterBridge(unittest.TestCase):
     def test_circuit_breaker_requires_repeated_errors_to_trip(self):
         with patch.dict("os.environ", {"BRIDGE_FAILURE_THRESHOLD": "3"}):
             MockOpenAI.failing_models = {"llama-3.3-70b-versatile"}
-            
+
             # First call: groq fails, fallback to gpt-4o-mini
             result1 = smart_router.ask_smart("first call", "auto")
             self.assertEqual(result1, "gpt-4o-mini: first call")
-            
+
             # Since threshold is 3, groq-bridge should still be available!
             self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
-            
+
             # Second call: groq fails again, fallback to gpt-4o-mini
             MockOpenAI.calls = []
             result2 = smart_router.ask_smart("second call", "auto")
             self.assertEqual(result2, "gpt-4o-mini: second call")
             self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
-            
+
             # Third call: groq fails a third time, fallback to gpt-4o-mini
             MockOpenAI.calls = []
             result3 = smart_router.ask_smart("third call", "auto")
             self.assertEqual(result3, "gpt-4o-mini: third call")
-            
+
             # Now the circuit breaker should have tripped! Groq-bridge is unavailable.
             self.assertFalse(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
-            
+
             # Fourth call: groq-bridge is in cooldown/open state, so it shouldn't even be called!
             MockOpenAI.calls = []
             result4 = smart_router.ask_smart("fourth call", "auto")
@@ -506,20 +513,20 @@ class TestSmartRouterBridge(unittest.TestCase):
     def test_circuit_breaker_resets_on_success(self):
         with patch.dict("os.environ", {"BRIDGE_FAILURE_THRESHOLD": "3"}):
             MockOpenAI.failing_models = {"llama-3.3-70b-versatile"}
-            
+
             # Fail once
             smart_router.ask_smart("first call", "auto")
             # Fail twice
             smart_router.ask_smart("second call", "auto")
-            
+
             # Now make it succeed
             MockOpenAI.failing_models = set()
             smart_router.ask_smart("third call", "auto")
-            
+
             # The count should be reset to 0. Let's make it fail again.
             MockOpenAI.failing_models = {"llama-3.3-70b-versatile"}
             smart_router.ask_smart("fourth call", "auto")
-            
+
             # Groq-bridge should still be available because the first two failures were reset by success!
             self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
 
@@ -596,10 +603,10 @@ class TestSmartRouterBridge(unittest.TestCase):
         provider = "groq-bridge"
         model1 = "model-1"
         model2 = "model-2"
-        
+
         smart_router.bridge_state.record_metric(provider, model1, latency=1.5, success=True, is_rate_limit=False)
         smart_router.bridge_state.record_metric(provider, model2, latency=2.5, success=False, is_rate_limit=True)
-        
+
         p_metrics = smart_router.bridge_state.get_provider_metrics(provider)
         self.assertEqual(p_metrics["latency_history"], [1.5, 2.5])
         self.assertEqual(p_metrics["success_history"], [1, 0])
@@ -680,12 +687,12 @@ class TestSmartRouterBridge(unittest.TestCase):
     def test_dynamic_deprioritization_due_to_high_latency(self):
         routes = smart_router._routes_for("auto")
         self.assertEqual(routes[0].provider, "groq-bridge")
-        
+
         for _ in range(3):
             smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=3.0, success=True)
-            
+
         smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=0.5, success=True)
-        
+
         routes = smart_router._routes_for("auto")
         free_cloud_providers = [r.provider for r in routes if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")]
         self.assertEqual(free_cloud_providers[0], "gemini-bridge")
@@ -700,9 +707,9 @@ class TestSmartRouterBridge(unittest.TestCase):
     def test_dynamic_deprioritization_due_to_frequent_429s(self):
         smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=0.1, success=False, is_rate_limit=True)
         smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=0.1, success=False, is_rate_limit=True)
-        
+
         smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=0.5, success=True)
-        
+
         routes = smart_router._routes_for("auto")
         free_cloud_providers = [r.provider for r in routes if r.cost_tier == "free-cloud" and r.provider in ("groq-bridge", "gemini-bridge")]
         self.assertEqual(free_cloud_providers[0], "gemini-bridge")
@@ -761,7 +768,7 @@ class TestSmartRouterBridge(unittest.TestCase):
     def test_creative_writing_fallback_when_gemini_cooling_down(self):
         # Mark gemini-bridge as unavailable (cooling down)
         smart_router.bridge_state.mark_unavailable("gemini-bridge", "429", model="gemini-2.5-flash")
-        
+
         # It should fall back to other free/local routes like groq-bridge first, then paid gpt-bridge.
         routes = smart_router._routes_for("creative_writing")
         providers = [r.provider for r in routes]
@@ -825,7 +832,7 @@ class TestSmartRouterBridge(unittest.TestCase):
 class TestSmartRouterMissingLibraries(unittest.TestCase):
     def setUp(self):
         self.sys_modules_backup = sys.modules.copy()
-        
+
     def tearDown(self):
         sys.modules.clear()
         sys.modules.update(self.sys_modules_backup)
@@ -840,21 +847,70 @@ class TestSmartRouterMissingLibraries(unittest.TestCase):
 
         spec = importlib.util.spec_from_file_location("smart_router_no_libs", ROOT / "smart-router-bridge" / "server.py")
         router_no_libs = importlib.util.module_from_spec(spec)
-        
+
         with patch.dict(sys.modules, {"openai": None, "google": None, "google.genai": None}):
             spec.loader.exec_module(router_no_libs)
-            
+
             self.assertIsNone(router_no_libs.openai)
             self.assertIsNone(router_no_libs.OpenAI)
             self.assertIsNone(router_no_libs.genai)
-            
+
             routes = router_no_libs._routes_for("auto")
             for route in routes:
                 self.assertFalse(router_no_libs._library_available(route))
-                
+
             with self.assertRaises(router_no_libs.bridge_state.ProviderUnavailableError) as ctx:
                 router_no_libs.ask_smart("hello", "auto")
             self.assertIn("required library not installed", str(ctx.exception))
+
+    def test_status_cache_bypass(self):
+        import time
+        import json
+        cache_path = Path(smart_router.bridge_state.STATUS_CACHE_FILE)
+        cache_data = {
+            "timestamp": time.time(),
+            "bridges": {
+                "groq-bridge": {
+                    "id": "groq-bridge",
+                    "status": "🔴 Offline",
+                    "details": "Connection failed"
+                }
+            }
+        }
+
+        if cache_path.exists():
+            try:
+                cache_path.unlink()
+            except OSError:
+                pass
+
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f)
+
+            self.assertFalse(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
+
+            health = smart_router.bridge_state.get_route_health("groq-bridge", "llama-3.3-70b-versatile")
+            self.assertFalse(health["is_available"])
+        finally:
+            if cache_path.exists():
+                try:
+                    cache_path.unlink()
+                except OSError:
+                    pass
+
+    def test_mcp_resources_definition(self):
+        self.assertIn("get_bridges_status", smart_router.mcp.resources)
+        self.assertIn("get_smart_router_status", smart_router.mcp.resources)
+
+        res = smart_router.mcp.resources["get_bridges_status"]()
+        self.assertIn("Status cache file not found", res)
+
+        res_router = smart_router.mcp.resources["get_smart_router_status"]()
+        import json
+        data = json.loads(res_router)
+        self.assertIn("routes", data)
+        self.assertGreater(len(data["routes"]), 0)
 
 
 if __name__ == "__main__":

@@ -163,5 +163,46 @@ class TestDiagnostics(unittest.TestCase):
         self.assertIn("⚪ No", report) # Unregistered gpt
         self.assertIn("Ollama mock running", report)
 
+    @patch("check_bridges.check_registration")
+    @patch("check_bridges.run_bridge_diagnostic")
+    @patch("check_bridges.check_ollama")
+    @patch("check_bridges.check_kasa")
+    def test_check_bridges_writes_cache(self, mock_kasa, mock_ollama, mock_run, mock_reg):
+        mock_reg.return_value = {"gpt-bridge": False}
+        mock_run.return_value = {
+            "id": "gpt-bridge",
+            "status": "🔴 Key Missing",
+            "latency": "—",
+            "key_configured": "No",
+            "key_masked": "Not Configured",
+            "registered": False,
+            "details": "Missing env"
+        }
+        mock_ollama.return_value = (True, 5, "Ollama mock running")
+        mock_kasa.return_value = (True, 2, "Kasa mock running")
+
+        cache_path = Path(check_bridges.__file__).resolve().parent / ".bridge_status_test.json"
+        if cache_path.exists():
+            try:
+                cache_path.unlink()
+            except OSError:
+                pass
+
+        try:
+            check_bridges.check_bridges()
+            self.assertTrue(cache_path.exists())
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertIn("timestamp", data)
+            self.assertIn("bridges", data)
+            self.assertIn("gpt-bridge", data["bridges"])
+            self.assertEqual(data["bridges"]["gpt-bridge"]["status"], "🔴 Key Missing")
+        finally:
+            if cache_path.exists():
+                try:
+                    cache_path.unlink()
+                except OSError:
+                    pass
+
 if __name__ == "__main__":
     unittest.main()

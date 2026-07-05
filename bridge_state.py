@@ -8,6 +8,7 @@ IS_TEST = "unittest" in sys.modules or "pytest" in sys.modules or os.environ.get
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE_PATH = os.path.join(ROOT_DIR, ".bridge_state_test.json" if IS_TEST else ".bridge_state.json")
 LOCK_FILE_PATH = STATE_FILE_PATH + ".lock"
+STATUS_CACHE_FILE = os.path.join(ROOT_DIR, ".bridge_status_test.json" if IS_TEST else ".bridge_status.json")
 DEFAULT_COOLDOWN_SECONDS = int(os.environ.get("BRIDGE_STATE_COOLDOWN_SECONDS", "300"))
 
 
@@ -106,6 +107,17 @@ def load_state():
             return json.loads(content) if content else _empty_state()
     except Exception:
         return _empty_state()
+
+
+def load_status_cache():
+    if not os.path.exists(STATUS_CACHE_FILE):
+        return None
+    try:
+        with open(STATUS_CACHE_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            return json.loads(content) if content else None
+    except Exception:
+        return None
 
 
 def save_state(state):
@@ -219,6 +231,14 @@ def mark_available(provider, model=None):
 
 
 def is_available(provider, model=None):
+    cache = load_status_cache()
+    if cache and "bridges" in cache:
+        bridge_info = cache["bridges"].get(provider)
+        if bridge_info:
+            status = bridge_info.get("status", "")
+            if status.startswith("🔴"):
+                return False
+
     state = load_state()
     provider_state = state.get("providers", {}).get(provider, {})
     if not _entry_is_available(provider_state):
@@ -338,8 +358,15 @@ def get_route_health(provider, model):
     model_state = provider_state.get("models", {}).get(model, {})
 
     # Check availability
-    provider_avail = _entry_is_available(provider_state)
-    model_avail = _entry_is_available(model_state)
+    cache = load_status_cache()
+    cache_offline = False
+    if cache and "bridges" in cache:
+        bridge_info = cache["bridges"].get(provider)
+        if bridge_info and bridge_info.get("status", "").startswith("🔴"):
+            cache_offline = True
+
+    provider_avail = _entry_is_available(provider_state) and not cache_offline
+    model_avail = _entry_is_available(model_state) and not cache_offline
     is_avail = provider_avail and model_avail
 
     # Get consecutive failures

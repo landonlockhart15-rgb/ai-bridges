@@ -353,5 +353,50 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
     raise bridge_state.ProviderUnavailableError("No smart-router routes succeeded. " + " | ".join(errors))
 
 
+@mcp.resource("status://bridges")
+def get_bridges_status() -> str:
+    """
+    Get the cached health and diagnostics status of all AI bridges.
+    """
+    status_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".bridge_status.json")
+    if os.path.exists(status_file):
+        try:
+            with open(status_file, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            import json
+            return json.dumps({"error": f"Failed to read cache: {str(e)}"}, indent=2)
+    import json
+    return json.dumps({"error": "Status cache file not found. Run check_bridges.py to generate it."}, indent=2)
+
+
+@mcp.resource("status://smart-router")
+def get_smart_router_status() -> str:
+    """
+    Get live route health, latency metrics, and failure counts for the smart router.
+    """
+    import json
+    routes = _routes_for("auto")
+    route_details = []
+    for r in routes:
+        health = bridge_state.get_route_health(r.provider, r.model)
+        route_details.append({
+            "provider": r.provider,
+            "model": r.model,
+            "cost_tier": r.cost_tier,
+            "env_configured": _env_available(r),
+            "library_installed": _library_available(r),
+            "is_available": health["is_available"],
+            "consecutive_failures": health["consecutive_failures"],
+            "success_rate": health["success_rate"],
+            "avg_latency": health["avg_latency"],
+            "provider_is_degraded": health.get("provider_is_degraded", False),
+        })
+    return json.dumps({
+        "timestamp": time.time(),
+        "routes": route_details
+    }, indent=2)
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")
