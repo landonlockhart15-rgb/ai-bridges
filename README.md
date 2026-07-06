@@ -245,6 +245,10 @@ ai-bridges/
 
 Pull requests are welcome. Provider-specific bridges should stay small, inspectable, and easy to run locally.
 
+## Credits
+
+Made by **LockhartLabs**.
+
 ## License
 
 MIT
