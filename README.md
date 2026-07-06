@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="lockhartlabs-logo.png" alt="LockhartLabs logo" width="120" />
+</p>
+
+<p align="center"><strong>Made by LockhartLabs</strong></p>
+
 # AI Bridges for Claude Code
 
 **Status:** Usable personal tooling / experimental bridge collection  
