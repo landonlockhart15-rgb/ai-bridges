@@ -817,6 +817,32 @@ class TestSmartRouterBridge(unittest.TestCase):
         # Both simple and complex keywords present -> complex takes precedence
         self.assertEqual(smart_router._task_complexity("summarize and refactor"), "complex")
 
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
+        "OPENAI_API_KEY": "paid-key",
+    }, clear=True)
+    def test_task_profile_aliases_reuse_existing_capability_filtering(self):
+        # "refactor" and "unit_test" are task-profile aliases for the "coding"
+        # capability, so they should filter to the same routes as "coding" itself.
+        coding_routes = smart_router._routes_for("coding")
+        for alias in ("refactor", "unit_test", "bug_fix", "code_review"):
+            aliased_routes = smart_router._routes_for(alias)
+            self.assertEqual(
+                [r.provider for r in aliased_routes],
+                [r.provider for r in coding_routes],
+            )
+
+        # "docs" aliases to "simple_extraction" and "story" aliases to "creative_writing".
+        self.assertEqual(
+            [r.provider for r in smart_router._routes_for("docs")],
+            [r.provider for r in smart_router._routes_for("simple_extraction")],
+        )
+        self.assertEqual(
+            [r.provider for r in smart_router._routes_for("story")],
+            [r.provider for r in smart_router._routes_for("creative_writing")],
+        )
+
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
     def test_routing_fails_to_escalate_complex_prompt_to_paid_tier(self):
         # The user requested that the bridge "decide if it can safely stay on a free/local model or if it *must* escalate to a paid tier"

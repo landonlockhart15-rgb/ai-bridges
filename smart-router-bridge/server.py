@@ -68,6 +68,23 @@ COMPLEX_INTENT_KEYWORDS = (
     "multi-step",
 )
 
+# Maps caller-facing task profile names to the canonical capability tags
+# already defined on each Route, so requests like task_type="unit_test" get
+# routed through the same capability-aware filtering as task_type="coding".
+TASK_PROFILE_ALIASES = {
+    "refactor": "coding",
+    "bug_fix": "coding",
+    "bugfix": "coding",
+    "debug": "coding",
+    "unit_test": "coding",
+    "test": "coding",
+    "code_review": "coding",
+    "docs": "simple_extraction",
+    "documentation": "simple_extraction",
+    "story": "creative_writing",
+    "copywriting": "creative_writing",
+}
+
 
 def _openai_client(api_key_env: str, base_url: str | None = None, default_headers: dict | None = None):
     if OpenAI is None:
@@ -211,6 +228,7 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
 
 def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
     normalized = (task_type or "auto").lower().strip()
+    normalized = TASK_PROFILE_ALIASES.get(normalized, normalized)
     simple_model = "llama-3.1-8b-instant" if normalized in ("simple", "fast", "quick") else "llama-3.3-70b-versatile"
     local_model = os.environ.get("SMART_ROUTER_LOCAL_MODEL", "gemma4:latest")
     paid_model = os.environ.get("SMART_ROUTER_PAID_MODEL", "gpt-4o-mini")
