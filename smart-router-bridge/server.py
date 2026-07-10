@@ -111,6 +111,30 @@ class TruncatedResponseError(Exception):
         self.partial_content = partial_content
 
 
+def _continuation_prompt(partial: str) -> str:
+    """Ask the next route for only the missing tail of a truncated answer."""
+    return (
+        "Continue the answer below from exactly where it stops. Return only the "
+        "missing continuation; do not repeat any existing text.\n\n"
+        f"Existing answer:\n{partial}"
+    )
+
+
+def _merge_continuation(partial: str, continuation: str) -> str:
+    """Join a continuation while removing a repeated boundary."""
+    if not partial:
+        return continuation
+    if not continuation:
+        return partial
+    if continuation.startswith(partial):
+        return continuation
+    limit = min(len(partial), len(continuation), 2000)
+    for size in range(limit, 0, -1):
+        if partial[-size:] == continuation[:size]:
+            return partial + continuation[size:]
+    return partial + continuation
+
+
 def _ask_openai_compatible(prompt: str, route: Route, base_url: str | None = None, api_key_env: str = "OPENAI_API_KEY",
                            default_headers: dict | None = None, max_tokens: int | None = None) -> str:
     client = _openai_client(api_key_env, base_url, default_headers)
@@ -337,6 +361,7 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
     """
     errors = []
     best_partial = None
+    request = prompt
     for route in _routes_for(task_type, prompt):
         if not _library_available(route):
             errors.append(f"{route.provider}/{route.model}: required library not installed")
@@ -353,22 +378,22 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
         try:
             usage_tracker.check_budget(route.provider, route.model)
             called = True
-            result = route.ask(prompt, route)
+            result = route.ask(request, route)
             latency = time.time() - start_time
             bridge_state.mark_available(route.provider)
             bridge_state.mark_available(route.provider, route.model)
             bridge_state.record_metric(route.provider, route.model, latency, success=True)
-            return result
+            return _merge_continuation(best_partial, result) if best_partial else result
         except TruncatedResponseError as e:
             # The route responded successfully but hit its token limit. It is
-            # healthy, so don't penalize it — just prefer a route that can
-            # return a complete answer (which may escalate to the paid tier).
+            # healthy, so don't penalize it; ask the next route for the missing tail.
             latency = time.time() - start_time
             bridge_state.mark_available(route.provider)
             bridge_state.mark_available(route.provider, route.model)
             bridge_state.record_metric(route.provider, route.model, latency, success=True)
             errors.append(f"{route.provider}/{route.model}: truncated by token limit")
-            best_partial = e.partial_content
+            best_partial = _merge_continuation(best_partial, e.partial_content) if best_partial else e.partial_content
+            request = _continuation_prompt(best_partial)
             continue
         except Exception as e:
             is_429_or_5xx = False
