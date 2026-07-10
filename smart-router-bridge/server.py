@@ -265,12 +265,19 @@ def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
     paid_routes = [Route("gpt-bridge", paid_model, "paid", "OPENAI_API_KEY", _ask_gpt,
                           ("coding", "creative_writing", "general", "simple_extraction"))]
 
-    if normalized in ("paid", "openai", "gpt"):
+    paid_requested = normalized in ("paid", "openai", "gpt")
+    allow_paid_fallback = os.environ.get("SMART_ROUTER_ALLOW_PAID_FALLBACK", "").lower() in ("1", "true", "yes", "on")
+
+    if paid_requested:
         routes = paid_routes + free_routes
     elif normalized in ("local", "offline", "private"):
-        routes = [free_routes[-1]] + free_routes[:-1] + paid_routes
+        routes = [free_routes[-1]] + free_routes[:-1]
+        if allow_paid_fallback:
+            routes += paid_routes
     else:
-        routes = free_routes + paid_routes
+        routes = free_routes
+        if allow_paid_fallback:
+            routes += paid_routes
 
     if normalized in CAPABILITY_TASK_TYPES:
         capable_routes = [r for r in routes if normalized in r.capabilities]
@@ -325,7 +332,8 @@ def _should_fallback(exc: Exception) -> bool:
 def ask_smart(prompt: str, task_type: str = "auto") -> str:
     """
     Ask the cheapest suitable provider first, then fall back through free/local routes
-    before using GPT as the paid last resort. Use task_type='paid' to request GPT first.
+    before using an explicitly enabled paid last resort. Use task_type='paid' to
+    request GPT first, or SMART_ROUTER_ALLOW_PAID_FALLBACK=1 to allow fallback.
     """
     errors = []
     best_partial = None
@@ -347,18 +355,18 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
             called = True
             result = route.ask(prompt, route)
             latency = time.time() - start_time
-            bridge_state.record_metric(route.provider, route.model, latency, success=True)
             bridge_state.mark_available(route.provider)
             bridge_state.mark_available(route.provider, route.model)
+            bridge_state.record_metric(route.provider, route.model, latency, success=True)
             return result
         except TruncatedResponseError as e:
             # The route responded successfully but hit its token limit. It is
             # healthy, so don't penalize it — just prefer a route that can
             # return a complete answer (which may escalate to the paid tier).
             latency = time.time() - start_time
-            bridge_state.record_metric(route.provider, route.model, latency, success=True)
             bridge_state.mark_available(route.provider)
             bridge_state.mark_available(route.provider, route.model)
+            bridge_state.record_metric(route.provider, route.model, latency, success=True)
             errors.append(f"{route.provider}/{route.model}: truncated by token limit")
             best_partial = e.partial_content
             continue
@@ -440,6 +448,7 @@ def get_smart_router_status() -> str:
             "success_rate": health["success_rate"],
             "avg_latency": health["avg_latency"],
             "provider_is_degraded": health.get("provider_is_degraded", False),
+            "consecutive_slow_calls": health.get("consecutive_slow_calls", 0),
         })
     return json.dumps({
         "timestamp": time.time(),

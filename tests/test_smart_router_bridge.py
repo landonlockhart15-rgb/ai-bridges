@@ -102,18 +102,26 @@ class TestSmartRouterBridge(unittest.TestCase):
             if Path(path).exists():
                 Path(path).unlink()
 
-    def test_default_order_is_free_local_then_paid(self):
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_api_key_alone_does_not_enable_paid_fallback(self):
         routes = smart_router._routes_for("auto")
         tiers = [route.cost_tier for route in routes]
-        self.assertEqual(tiers[:-1], ["free-cloud", "free-cloud", "free-cloud", "free-cloud", "local"])
-        self.assertEqual(tiers[-1], "paid")
+        self.assertEqual(tiers, ["free-cloud", "free-cloud", "free-cloud", "free-cloud", "local"])
+
+    @patch.dict("os.environ", {
+        "OPENAI_API_KEY": "paid-key",
+        "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",
+    }, clear=True)
+    def test_paid_fallback_requires_explicit_opt_in(self):
+        routes = smart_router._routes_for("auto")
+        self.assertEqual(routes[-1].cost_tier, "paid")
 
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
     def test_simple_prompt_prefers_local_first_in_auto_mode(self):
         routes = smart_router._routes_for("auto", prompt="Please summarize this release note in one sentence.")
         tiers = [route.cost_tier for route in routes]
         self.assertEqual(tiers[0], "local")
-        self.assertEqual(tiers[-1], "paid")
+        self.assertNotIn("paid", tiers)
 
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
     def test_complex_prompt_prefers_free_cloud_before_local_in_auto_mode(self):
@@ -124,7 +132,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         tiers = [route.cost_tier for route in routes]
         self.assertEqual(tiers[0], "free-cloud")
         self.assertIn("local", tiers)
-        self.assertEqual(tiers[-1], "paid")
+        self.assertNotIn("paid", tiers)
 
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
     def test_ask_smart_uses_first_available_free_route(self):
@@ -132,7 +140,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(result, "llama-3.3-70b-versatile: hello")
         self.assertEqual(MockOpenAI.calls, [("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile")])
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_paid_is_last_resort_after_free_rate_limit(self):
         MockOpenAI.failing_models = {"llama-3.3-70b-versatile", "gemma4:latest"}
         result = smart_router.ask_smart("fallback", "auto")
@@ -146,20 +154,20 @@ class TestSmartRouterBridge(unittest.TestCase):
             ],
         )
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_paid_task_type_still_requests_gpt_first_for_complex_prompts(self):
         result = smart_router.ask_smart("Refactor this module and explain the tradeoffs.", "paid")
         self.assertEqual(result, "gpt-4o-mini: Refactor this module and explain the tradeoffs.")
         self.assertEqual(MockOpenAI.calls, [(None, "gpt-4o-mini")])
 
-    @patch.dict("os.environ", {"GEMINI_API_KEY": "gemini-key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GEMINI_API_KEY": "gemini-key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_provider_error_falls_back_to_next_route(self):
         smart_router.genai.Client.side_effect = RuntimeError("gemini unavailable")
         MockOpenAI.failing_models = {"gemma4:latest"}
         result = smart_router.ask_smart("provider down", "auto")
         self.assertEqual(result, "gpt-4o-mini: provider down")
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_paid_task_type_requests_gpt_first(self):
         result = smart_router.ask_smart("use paid", "paid")
         self.assertEqual(result, "gpt-4o-mini: use paid")
@@ -172,7 +180,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertIn("No smart-router routes succeeded", str(ctx.exception))
         self.assertIn("missing GROQ_API_KEY", str(ctx.exception))
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_cooldown_avoids_previously_failed_provider(self):
         # First call: groq fails with a rate limit
         MockOpenAI.failing_models = {"llama-3.3-70b-versatile"}
@@ -195,7 +203,7 @@ class TestSmartRouterBridge(unittest.TestCase):
                 smart_router.ask_smart("budget check", "auto")
             self.assertIn("Budget cap of $10.00 exceeded", str(ctx.exception))
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_poison_pill_input_disables_all_providers_for_subsequent_calls(self):
         original_create = MockOpenAI._mock_create
 
@@ -234,7 +242,8 @@ class TestSmartRouterBridge(unittest.TestCase):
     @patch.dict("os.environ", {
         "GROQ_API_KEY": "gsk_test_key",
         "SMART_ROUTER_LOCAL_MODEL": "my-local-llama",
-        "SMART_ROUTER_PAID_MODEL": "my-paid-gpt"
+        "SMART_ROUTER_PAID_MODEL": "my-paid-gpt",
+        "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",
     }, clear=True)
     def test_env_var_model_overrides(self):
         routes = smart_router._routes_for("auto")
@@ -429,6 +438,29 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertTrue(health["provider_is_degraded"])
 
     @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_sustained_high_latency_opens_provider_circuit_and_fast_probe_recovers(self):
+        provider = "groq-bridge"
+        model = "llama-3.3-70b-versatile"
+
+        for _ in range(2):
+            smart_router.bridge_state.record_metric(provider, model, latency=1.1, success=True)
+        self.assertTrue(smart_router.bridge_state.is_available(provider, model))
+
+        smart_router.bridge_state.record_metric(provider, model, latency=1.1, success=True)
+        self.assertFalse(smart_router.bridge_state.is_available(provider, model))
+        self.assertFalse(smart_router.bridge_state.is_available(provider, "another-model"))
+        health = smart_router.bridge_state.get_route_health(provider, model)
+        self.assertEqual(health["consecutive_slow_calls"], 3)
+
+        smart_router.bridge_state.record_metric(provider, model, latency=0.2, success=True)
+        self.assertTrue(smart_router.bridge_state.is_available(provider, model))
+        health = smart_router.bridge_state.get_route_health(provider, model)
+        self.assertEqual(health["consecutive_slow_calls"], 0)
+
+    @patch.dict("os.environ", {
         "GROQ_API_KEY": "gsk_test_key",
         "GEMINI_API_KEY": "gemini-key",
         "SMART_ROUTER_LATENCY_THRESHOLD": "5.0",
@@ -479,7 +511,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(free_cloud_providers[0], "groq-bridge")
         self.assertEqual(free_cloud_providers[1], "gemini-bridge")
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_circuit_breaker_requires_repeated_errors_to_trip(self):
         with patch.dict("os.environ", {"BRIDGE_FAILURE_THRESHOLD": "3"}):
             MockOpenAI.failing_models = {"llama-3.3-70b-versatile"}
@@ -512,7 +544,7 @@ class TestSmartRouterBridge(unittest.TestCase):
             called_models = [call[1] for call in MockOpenAI.calls]
             self.assertNotIn("llama-3.3-70b-versatile", called_models)
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_circuit_breaker_resets_on_success(self):
         with patch.dict("os.environ", {"BRIDGE_FAILURE_THRESHOLD": "3"}):
             MockOpenAI.failing_models = {"llama-3.3-70b-versatile"}
@@ -533,7 +565,7 @@ class TestSmartRouterBridge(unittest.TestCase):
             # Groq-bridge should still be available because the first two failures were reset by success!
             self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_dynamic_fallback_chain_health_deprioritization(self):
         # 1. Initially all are healthy: Free (Groq, Gemini, Cerebras, OpenRouter) -> Local (hf-bridge) -> Paid (gpt-bridge)
         routes1 = smart_router._routes_for("auto")
@@ -570,7 +602,7 @@ class TestSmartRouterBridge(unittest.TestCase):
             routes4 = smart_router._routes_for("auto")
             self.assertEqual(routes4[-1].provider, "groq-bridge")
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_auto_cost_tier_stays_free_then_local_then_paid_even_with_better_paid_metrics(self):
         # Give the paid route artificially strong health so the sort key has a chance to mis-rank it.
         for _ in range(4):
@@ -590,7 +622,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(free_cloud_routes[0], "gemini-bridge")
         self.assertIn("groq-bridge", free_cloud_routes)
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_empty_and_whitespace_task_types_default_to_auto_cost_order(self):
         auto_routes = smart_router._routes_for("auto")
         none_routes = smart_router._routes_for(None)
@@ -722,6 +754,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         "GROQ_API_KEY": "gsk_test_key",
         "GEMINI_API_KEY": "gemini-key",
         "OPENAI_API_KEY": "paid-key",
+        "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",
     }, clear=True)
     def test_capability_task_type_filters_to_capable_routes_only(self):
         routes = smart_router._routes_for("creative_writing")
@@ -736,6 +769,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         "GROQ_API_KEY": "gsk_test_key",
         "GEMINI_API_KEY": "gemini-key",
         "OPENAI_API_KEY": "paid-key",
+        "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",
     }, clear=True)
     def test_simple_extraction_capability_excludes_gemini_and_cerebras(self):
         routes = smart_router._routes_for("simple_extraction")
@@ -749,11 +783,12 @@ class TestSmartRouterBridge(unittest.TestCase):
     def test_unrecognized_task_type_is_unaffected_by_capability_filtering(self):
         # "auto" is not a capability task type, so all routes remain candidates.
         routes = smart_router._routes_for("auto")
-        self.assertEqual(len(routes), 6)
+        self.assertEqual(len(routes), 5)
 
     @patch.dict("os.environ", {
         "GROQ_API_KEY": "gsk_test_key",
         "OPENAI_API_KEY": "paid-key",
+        "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",
     }, clear=True)
     def test_creative_writing_fallback_when_gemini_missing_env(self):
         # GEMINI_API_KEY is not set, so gemini-bridge is not available.
@@ -767,6 +802,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         "GROQ_API_KEY": "gsk_test_key",
         "GEMINI_API_KEY": "gemini-key",
         "OPENAI_API_KEY": "paid-key",
+        "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",
     }, clear=True)
     def test_creative_writing_fallback_when_gemini_cooling_down(self):
         # Mark gemini-bridge as unavailable (cooling down)
@@ -824,6 +860,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         "GROQ_API_KEY": "gsk_test_key",
         "GEMINI_API_KEY": "gemini-key",
         "OPENAI_API_KEY": "paid-key",
+        "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",
     }, clear=True)
     def test_task_profile_aliases_reuse_existing_capability_filtering(self):
         # "refactor" and "unit_test" are task-profile aliases for the "coding"
@@ -846,7 +883,7 @@ class TestSmartRouterBridge(unittest.TestCase):
             [r.provider for r in smart_router._routes_for("creative_writing")],
         )
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_routing_fails_to_escalate_complex_prompt_to_paid_tier(self):
         # The user requested that the bridge "decide if it can safely stay on a free/local model or if it *must* escalate to a paid tier"
         # However, the current implementation maps "complex" tasks to priority: free-cloud=0, local=1, paid=2.
@@ -857,7 +894,7 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(tiers[0], "free-cloud")
         self.assertEqual(tiers[-1], "paid")
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_truncated_free_response_escalates_to_next_route(self):
         # groq's answer hits the token limit, so the router should not stop there
         # and instead escalate through the remaining routes (local hf-bridge is
