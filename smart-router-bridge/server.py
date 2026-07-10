@@ -99,6 +99,18 @@ def _openai_client(api_key_env: str, base_url: str | None = None, default_header
     )
 
 
+class TruncatedResponseError(Exception):
+    """Raised when a free/local route's response was cut off by a token limit.
+
+    Carries the partial content so the caller can still use it if every
+    subsequent route also fails to produce a complete answer.
+    """
+
+    def __init__(self, partial_content: str):
+        super().__init__("response truncated due to token limit")
+        self.partial_content = partial_content
+
+
 def _ask_openai_compatible(prompt: str, route: Route, base_url: str | None = None, api_key_env: str = "OPENAI_API_KEY",
                            default_headers: dict | None = None, max_tokens: int | None = None) -> str:
     client = _openai_client(api_key_env, base_url, default_headers)
@@ -117,7 +129,12 @@ def _ask_openai_compatible(prompt: str, route: Route, base_url: str | None = Non
             prompt_tokens=getattr(usage, "prompt_tokens", 0),
             completion_tokens=getattr(usage, "completion_tokens", 0),
         )
-    return response.choices[0].message.content
+    choice = response.choices[0]
+    content = choice.message.content
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason == "length" and route.cost_tier != "paid":
+        raise TruncatedResponseError(content)
+    return content
 
 
 def _ask_groq(prompt: str, route: Route) -> str:
@@ -311,6 +328,7 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
     before using GPT as the paid last resort. Use task_type='paid' to request GPT first.
     """
     errors = []
+    best_partial = None
     for route in _routes_for(task_type, prompt):
         if not _library_available(route):
             errors.append(f"{route.provider}/{route.model}: required library not installed")
@@ -333,6 +351,17 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
             bridge_state.mark_available(route.provider)
             bridge_state.mark_available(route.provider, route.model)
             return result
+        except TruncatedResponseError as e:
+            # The route responded successfully but hit its token limit. It is
+            # healthy, so don't penalize it — just prefer a route that can
+            # return a complete answer (which may escalate to the paid tier).
+            latency = time.time() - start_time
+            bridge_state.record_metric(route.provider, route.model, latency, success=True)
+            bridge_state.mark_available(route.provider)
+            bridge_state.mark_available(route.provider, route.model)
+            errors.append(f"{route.provider}/{route.model}: truncated by token limit")
+            best_partial = e.partial_content
+            continue
         except Exception as e:
             is_429_or_5xx = False
             is_rate_limit = False
@@ -368,6 +397,8 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
                 continue
             raise
 
+    if best_partial is not None:
+        return best_partial
     raise bridge_state.ProviderUnavailableError("No smart-router routes succeeded. " + " | ".join(errors))
 
 
