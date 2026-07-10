@@ -38,6 +38,7 @@ class APIConnectionError(Exception):
 class MockOpenAI:
     calls = []
     failing_models = set()
+    truncated_models = set()
 
     def __init__(self, api_key=None, base_url=None, default_headers=None):
         self.api_key = api_key
@@ -58,6 +59,7 @@ class MockOpenAI:
         response.usage.completion_tokens = 4
         response.choices = [MagicMock()]
         response.choices[0].message.content = f"{model}: {messages[-1]['content']}"
+        response.choices[0].finish_reason = "length" if model in self.truncated_models else "stop"
         return response
 
 
@@ -89,6 +91,7 @@ class TestSmartRouterBridge(unittest.TestCase):
     def setUp(self):
         MockOpenAI.calls = []
         MockOpenAI.failing_models = set()
+        MockOpenAI.truncated_models = set()
         smart_router.genai.Client.side_effect = None
         for path in (
             smart_router.bridge_state.STATE_FILE_PATH,
@@ -853,6 +856,37 @@ class TestSmartRouterBridge(unittest.TestCase):
         # It still prioritizes free-cloud over paid!
         self.assertEqual(tiers[0], "free-cloud")
         self.assertEqual(tiers[-1], "paid")
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_truncated_free_response_escalates_to_next_route(self):
+        # groq's answer hits the token limit, so the router should not stop there
+        # and instead escalate through the remaining routes (local hf-bridge is
+        # unreachable in this mock, so it lands on the paid tier).
+        MockOpenAI.truncated_models = {"llama-3.3-70b-versatile"}
+        result = smart_router.ask_smart("write something long", "auto")
+        self.assertEqual(result, "gpt-4o-mini: write something long")
+        called_models = [call[1] for call in MockOpenAI.calls]
+        self.assertEqual(called_models, ["llama-3.3-70b-versatile", "gemma4:latest", "gpt-4o-mini"])
+
+        # A truncated response is not a real failure, so the route should not be
+        # cooling down afterwards.
+        self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
+    def test_truncated_response_used_as_fallback_when_nothing_completes(self):
+        # No paid route configured and the local route is unreachable, so the
+        # truncated free-tier answer is returned rather than raising an error.
+        MockOpenAI.truncated_models = {"llama-3.3-70b-versatile"}
+        result = smart_router.ask_smart("write something long", "auto")
+        self.assertEqual(result, "llama-3.3-70b-versatile: write something long")
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "paid-key"}, clear=True)
+    def test_paid_route_truncation_is_returned_directly(self):
+        # The paid tier is the last resort, so a truncated paid response is
+        # simply returned rather than triggering further escalation.
+        MockOpenAI.truncated_models = {"gpt-4o-mini"}
+        result = smart_router.ask_smart("write something long", "paid")
+        self.assertEqual(result, "gpt-4o-mini: write something long")
 
 
 class TestSmartRouterMissingLibraries(unittest.TestCase):
