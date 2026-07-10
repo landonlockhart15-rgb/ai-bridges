@@ -10,6 +10,8 @@ STATE_FILE_PATH = os.path.join(ROOT_DIR, ".bridge_state_test.json" if IS_TEST el
 LOCK_FILE_PATH = STATE_FILE_PATH + ".lock"
 STATUS_CACHE_FILE = os.path.join(ROOT_DIR, ".bridge_status_test.json" if IS_TEST else ".bridge_status.json")
 DEFAULT_COOLDOWN_SECONDS = int(os.environ.get("BRIDGE_STATE_COOLDOWN_SECONDS", "300"))
+DEFAULT_LATENCY_THRESHOLD_SECONDS = 5.0
+DEFAULT_SLOW_CALL_THRESHOLD = 3
 
 
 class ProviderUnavailableError(RuntimeError):
@@ -266,6 +268,7 @@ def raise_if_unavailable(provider, model=None):
 
 
 def record_metric(provider, model, latency, success, is_rate_limit=False):
+    """Record route health and open the provider circuit after sustained slowness."""
     with SimpleFileLock(LOCK_FILE_PATH):
         state = load_state()
         providers = state.setdefault("providers", {})
@@ -298,6 +301,37 @@ def record_metric(provider, model, latency, success, is_rate_limit=False):
             p_success_history[:] = p_success_history[-10:]
         if len(p_rate_limit_history) > 10:
             p_rate_limit_history[:] = p_rate_limit_history[-10:]
+
+        latency_threshold = float(os.environ.get(
+            "SMART_ROUTER_LATENCY_THRESHOLD",
+            str(DEFAULT_LATENCY_THRESHOLD_SECONDS),
+        ))
+        slow_call_threshold = int(os.environ.get(
+            "BRIDGE_SLOW_CALL_THRESHOLD",
+            str(DEFAULT_SLOW_CALL_THRESHOLD),
+        ))
+        if success and latency > latency_threshold:
+            consecutive_slow_calls = provider_state.get("consecutive_slow_calls", 0) + 1
+            provider_state["consecutive_slow_calls"] = consecutive_slow_calls
+            if consecutive_slow_calls >= slow_call_threshold:
+                now = _now()
+                provider_state.update({
+                    "status": "open",
+                    "reason": (
+                        f"high_latency: {consecutive_slow_calls} consecutive calls "
+                        f"exceeded {latency_threshold:.3f}s"
+                    ),
+                    "last_error_at": _iso_timestamp(now),
+                    "cooldown_until": now + DEFAULT_COOLDOWN_SECONDS,
+                })
+        else:
+            provider_state["consecutive_slow_calls"] = 0
+            if success and str(provider_state.get("reason", "")).startswith("high_latency:"):
+                provider_state.update({
+                    "status": "ok",
+                    "reason": None,
+                    "cooldown_until": 0,
+                })
             
         save_state(state)
 
@@ -352,6 +386,7 @@ def get_route_health(provider, model):
       - provider_success_rate (float)
       - provider_avg_latency (float)
       - provider_is_degraded (bool)
+      - consecutive_slow_calls (int)
     """
     state = load_state()
     provider_state = state.get("providers", {}).get(provider, {})
@@ -404,6 +439,7 @@ def get_route_health(provider, model):
         "provider_success_rate": provider_success_rate,
         "provider_avg_latency": provider_avg_latency,
         "provider_is_degraded": provider_is_degraded,
+        "consecutive_slow_calls": provider_state.get("consecutive_slow_calls", 0),
     }
 
 

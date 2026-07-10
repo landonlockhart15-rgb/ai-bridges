@@ -197,6 +197,10 @@ ollama pull qwen2.5:3b
 
 Cloud Hugging Face models require `HF_TOKEN`.
 
+The smart router never falls back to the paid GPT bridge merely because
+`OPENAI_API_KEY` is configured. Request `task_type="paid"` explicitly, or set
+`SMART_ROUTER_ALLOW_PAID_FALLBACK=1` to opt in to paid last-resort fallback.
+
 ### openrouter-bridge
 
 | Tool | Description |
