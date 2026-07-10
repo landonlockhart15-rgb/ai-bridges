@@ -901,13 +901,20 @@ class TestSmartRouterBridge(unittest.TestCase):
         # unreachable in this mock, so it lands on the paid tier).
         MockOpenAI.truncated_models = {"llama-3.3-70b-versatile"}
         result = smart_router.ask_smart("write something long", "auto")
-        self.assertEqual(result, "gpt-4o-mini: write something long")
+        self.assertIn("llama-3.3-70b-versatile: write something long", result)
+        self.assertIn("gpt-4o-mini: Continue the answer", result)
         called_models = [call[1] for call in MockOpenAI.calls]
         self.assertEqual(called_models, ["llama-3.3-70b-versatile", "gemma4:latest", "gpt-4o-mini"])
 
         # A truncated response is not a real failure, so the route should not be
         # cooling down afterwards.
         self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "llama-3.3-70b-versatile"))
+
+    def test_continuation_merge_removes_repeated_boundary(self):
+        self.assertEqual(
+            smart_router._merge_continuation("alpha beta", "beta gamma"),
+            "alpha beta gamma",
+        )
 
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
     def test_truncated_response_used_as_fallback_when_nothing_completes(self):
