@@ -39,7 +39,9 @@ routing capability are both in scope, judged only on reliability and value.
 
 ## Do NOT
 - Break the cost hierarchy or quietly route to paid models when a free or local
-  one would do. Paid is the last resort, never the convenient default.
+  one would do. Paid is the last resort, never the convenient default — and
+  never an *automatic* fallback destination: a dead free chain surfaces a clear
+  error instead of silently escalating to paid.
 - Hardcode secrets/keys, or leak them in errors or logs.
 - Add a second parallel bridge/registration mechanism when one exists — follow
   the established pattern.
