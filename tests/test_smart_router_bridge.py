@@ -460,6 +460,219 @@ class TestSmartRouterBridge(unittest.TestCase):
         health = smart_router.bridge_state.get_route_health(provider, model)
         self.assertEqual(health["consecutive_slow_calls"], 0)
 
+    @patch.dict("os.environ", {}, clear=True)
+    def test_latency_circuit_breaker_defaults(self):
+        provider = "groq-bridge"
+        model = "llama-3.3-70b-versatile"
+        
+        # Verify default latency threshold does not trip at <= 5.0s (default threshold is 5.0)
+        for _ in range(3):
+            smart_router.bridge_state.record_metric(provider, model, latency=5.0, success=True)
+        self.assertTrue(smart_router.bridge_state.is_available(provider, model))
+        
+        # Verify default slow call threshold (3) trips after 3 consecutive > 5.0s calls
+        for _ in range(2):
+            smart_router.bridge_state.record_metric(provider, model, latency=5.1, success=True)
+        self.assertTrue(smart_router.bridge_state.is_available(provider, model))
+        
+        smart_router.bridge_state.record_metric(provider, model, latency=5.1, success=True)
+        self.assertFalse(smart_router.bridge_state.is_available(provider, model))
+
+    @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_latency_circuit_breaker_non_slow_call_resets_count(self):
+        provider = "groq-bridge"
+        model = "llama-3.3-70b-versatile"
+        
+        # Two slow calls: consecutive_slow_calls should be 2
+        smart_router.bridge_state.record_metric(provider, model, latency=1.2, success=True)
+        smart_router.bridge_state.record_metric(provider, model, latency=1.2, success=True)
+        health = smart_router.bridge_state.get_route_health(provider, model)
+        self.assertEqual(health["consecutive_slow_calls"], 2)
+        
+        # One fast call: consecutive_slow_calls should reset to 0
+        smart_router.bridge_state.record_metric(provider, model, latency=0.8, success=True)
+        health = smart_router.bridge_state.get_route_health(provider, model)
+        self.assertEqual(health["consecutive_slow_calls"], 0)
+        self.assertTrue(smart_router.bridge_state.is_available(provider, model))
+
+    @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_latency_circuit_breaker_failed_call_resets_count(self):
+        provider = "groq-bridge"
+        model = "llama-3.3-70b-versatile"
+        
+        # Two slow calls: consecutive_slow_calls should be 2
+        smart_router.bridge_state.record_metric(provider, model, latency=1.2, success=True)
+        smart_router.bridge_state.record_metric(provider, model, latency=1.2, success=True)
+        health = smart_router.bridge_state.get_route_health(provider, model)
+        self.assertEqual(health["consecutive_slow_calls"], 2)
+        
+        # A failed call should reset consecutive_slow_calls to 0
+        smart_router.bridge_state.record_metric(provider, model, latency=0.1, success=False)
+        health = smart_router.bridge_state.get_route_health(provider, model)
+        self.assertEqual(health["consecutive_slow_calls"], 0)
+        self.assertTrue(smart_router.bridge_state.is_available(provider, model))
+
+    # ------------------------------------------------------------------
+    # Adversarial coverage for the latency circuit breaker (bridge_state)
+    # ------------------------------------------------------------------
+
+    @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_latency_exactly_at_threshold_is_not_slow(self):
+        """Boundary: `latency > threshold` is strict, so latency == threshold must never
+        count as a slow call, even when repeated far past the slow-call threshold."""
+        provider = "groq-bridge"
+        model = "llama-3.3-70b-versatile"
+        for _ in range(10):
+            smart_router.bridge_state.record_metric(provider, model, latency=1.0, success=True)
+        health = smart_router.bridge_state.get_route_health(provider, model)
+        self.assertEqual(health["consecutive_slow_calls"], 0)
+        self.assertTrue(smart_router.bridge_state.is_available(provider, model))
+
+    @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_fast_success_does_not_reopen_error_tripped_circuit(self):
+        """A fast successful call resets the slow-call counter but must NOT clear a circuit
+        that was opened by the error-based breaker (reason without a 'high_latency:' prefix).
+        The recovery guard keys off the reason string; if it were sloppy it would silently
+        revive a provider still cooling off from real 429/5xx errors."""
+        provider = "groq-bridge"
+        model = "llama-3.3-70b-versatile"
+
+        # Trip the error-based breaker at the provider level (default test threshold = 1).
+        smart_router.bridge_state.mark_unavailable(
+            provider, "server error 500", is_429_or_5xx=True
+        )
+        self.assertFalse(smart_router.bridge_state.is_available(provider, model))
+
+        # A fast success arrives (e.g. a stray in-flight response). Must stay open.
+        smart_router.bridge_state.record_metric(provider, model, latency=0.1, success=True)
+        self.assertFalse(smart_router.bridge_state.is_available(provider, model))
+        state = smart_router.bridge_state.load_state()
+        pstate = state["providers"][provider]
+        self.assertEqual(pstate["status"], "open")
+        self.assertEqual(pstate["reason"], "server error 500")
+        # But the slow-call counter is still reset.
+        self.assertEqual(pstate.get("consecutive_slow_calls", 0), 0)
+
+    @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_failed_call_does_not_recover_latency_tripped_circuit(self):
+        """Only a fast *successful* probe recovers a latency-opened circuit. A failed call
+        resets the counter but must leave the provider open/cooling off."""
+        provider = "groq-bridge"
+        model = "llama-3.3-70b-versatile"
+
+        for _ in range(3):
+            smart_router.bridge_state.record_metric(provider, model, latency=1.5, success=True)
+        self.assertFalse(smart_router.bridge_state.is_available(provider, model))
+
+        # Failure with tiny latency: resets counter but does NOT restore status.
+        smart_router.bridge_state.record_metric(provider, model, latency=0.01, success=False)
+        self.assertFalse(smart_router.bridge_state.is_available(provider, model))
+        state = smart_router.bridge_state.load_state()
+        pstate = state["providers"][provider]
+        self.assertEqual(pstate["status"], "open")
+        self.assertTrue(str(pstate["reason"]).startswith("high_latency:"))
+        self.assertEqual(pstate.get("consecutive_slow_calls", 0), 0)
+
+    @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_slow_calls_accumulate_across_models_of_same_provider(self):
+        """The slow-call counter lives at the provider level, so slowness spread across
+        different models of one provider still trips the provider-wide circuit and takes
+        every model down with it."""
+        provider = "groq-bridge"
+        smart_router.bridge_state.record_metric(provider, "model-a", latency=1.5, success=True)
+        smart_router.bridge_state.record_metric(provider, "model-b", latency=1.5, success=True)
+        self.assertTrue(smart_router.bridge_state.is_available(provider, "model-a"))
+        smart_router.bridge_state.record_metric(provider, "model-c", latency=1.5, success=True)
+
+        self.assertFalse(smart_router.bridge_state.is_available(provider, "model-a"))
+        self.assertFalse(smart_router.bridge_state.is_available(provider, "model-b"))
+        self.assertFalse(smart_router.bridge_state.is_available(provider, "model-c"))
+
+    @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_fast_success_on_other_model_recovers_provider_circuit(self):
+        """A fast probe on any model of the provider recovers the shared provider circuit."""
+        provider = "groq-bridge"
+        for _ in range(3):
+            smart_router.bridge_state.record_metric(provider, "model-a", latency=1.5, success=True)
+        self.assertFalse(smart_router.bridge_state.is_available(provider, "model-a"))
+
+        smart_router.bridge_state.record_metric(provider, "model-b", latency=0.1, success=True)
+        self.assertTrue(smart_router.bridge_state.is_available(provider, "model-a"))
+        self.assertTrue(smart_router.bridge_state.is_available(provider, "model-b"))
+
+    @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_latency_trip_records_reason_and_cooldown_without_touching_failures(self):
+        """Pin the reason format (recovery depends on the 'high_latency:' prefix) and that
+        a latency trip sets a future cooldown while leaving consecutive_failures untouched —
+        the two breakers must not cross-contaminate their counters."""
+        provider = "groq-bridge"
+        model = "llama-3.3-70b-versatile"
+        for _ in range(3):
+            smart_router.bridge_state.record_metric(provider, model, latency=2.0, success=True)
+
+        state = smart_router.bridge_state.load_state()
+        pstate = state["providers"][provider]
+        self.assertEqual(pstate["status"], "open")
+        self.assertEqual(pstate["reason"], "high_latency: 3 consecutive calls exceeded 1.000s")
+        self.assertGreater(pstate["cooldown_until"], smart_router.bridge_state._now())
+        self.assertEqual(pstate.get("consecutive_failures", 0), 0)
+        health = smart_router.bridge_state.get_route_health(provider, model)
+        self.assertEqual(health["consecutive_failures"], 0)
+
+    @patch.dict("os.environ", {
+        "SMART_ROUTER_LATENCY_THRESHOLD": "1.0",
+        "BRIDGE_SLOW_CALL_THRESHOLD": "3",
+    }, clear=True)
+    def test_slow_calls_keep_climbing_while_already_open(self):
+        """Once open, further slow calls should keep incrementing the counter and refresh the
+        reason/cooldown rather than resetting — the breaker must not accidentally self-heal
+        while the provider is still slow."""
+        provider = "groq-bridge"
+        model = "llama-3.3-70b-versatile"
+        for _ in range(5):
+            smart_router.bridge_state.record_metric(provider, model, latency=2.0, success=True)
+        health = smart_router.bridge_state.get_route_health(provider, model)
+        self.assertEqual(health["consecutive_slow_calls"], 5)
+        self.assertFalse(smart_router.bridge_state.is_available(provider, model))
+        state = smart_router.bridge_state.load_state()
+        self.assertIn("5 consecutive calls", state["providers"][provider]["reason"])
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_malformed_slow_call_threshold_env_raises(self):
+        """Adversarial input: a non-integer BRIDGE_SLOW_CALL_THRESHOLD is not sanitized, so
+        record_metric raises ValueError. This pins current (fragile) behavior so a future
+        guard/regression is visible."""
+        import os as _os
+        _os.environ["BRIDGE_SLOW_CALL_THRESHOLD"] = "not-a-number"
+        with self.assertRaises(ValueError):
+            smart_router.bridge_state.record_metric(
+                "groq-bridge", "llama-3.3-70b-versatile", latency=0.1, success=True
+            )
+
     @patch.dict("os.environ", {
         "GROQ_API_KEY": "gsk_test_key",
         "GEMINI_API_KEY": "gemini-key",
