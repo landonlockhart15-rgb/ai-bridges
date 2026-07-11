@@ -445,7 +445,13 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
             errors.append(f"{route.provider}/{route.model}: {e.__class__.__name__}: {e}")
             if _is_retryable_error(e) or _should_fallback(e):
                 reason = e.__class__.__name__
-                bridge_state.mark_unavailable(route.provider, reason, model=route.model, is_429_or_5xx=is_429_or_5xx)
+                headers = getattr(getattr(e, "response", None), "headers", None)
+                recorded_quota_reset = (
+                    is_rate_limit
+                    and bridge_state.record_rate_limit_headers(route.provider, route.model, headers)
+                )
+                if not recorded_quota_reset:
+                    bridge_state.mark_unavailable(route.provider, reason, model=route.model, is_429_or_5xx=is_429_or_5xx)
                 continue
             raise
 

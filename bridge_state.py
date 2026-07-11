@@ -36,6 +36,7 @@ Distinction between Circuit Breakers and Degradation:
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -134,6 +135,89 @@ def _now():
 
 def _iso_timestamp(epoch_seconds):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_seconds))
+
+
+def parse_rate_limit_reset(value, now=None):
+    """Return seconds until a provider's rate-limit reset, or ``None``.
+
+    Providers use all of relative durations (``2m59.56s``), Unix seconds, and
+    Unix milliseconds for these headers.  Keep this parser here so every bridge
+    writes the same cooldown representation to the shared state file.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    now = _now() if now is None else now
+
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        number = None
+    if number is not None:
+        # Epoch milliseconds (as returned by OpenRouter) are otherwise treated
+        # as a multi-millennia relative cooldown.
+        if number >= 100_000_000_000:
+            return max(0.0, number / 1000.0 - now)
+        # Contemporary Unix seconds are unambiguously timestamps; smaller
+        # values are relative durations.
+        if number >= 1_000_000_000:
+            return max(0.0, number - now)
+        return max(0.0, number)
+
+    total = 0.0
+    matched = False
+    for amount, unit in re.findall(r"(\d+(?:\.\d+)?)\s*(d|h|m|s)", text):
+        matched = True
+        total += float(amount) * {"d": 86400, "h": 3600, "m": 60, "s": 1}[unit]
+    return total if matched else None
+
+
+def record_rate_limit_headers(provider, model, headers):
+    """Record an explicit exhausted quota from OpenAI-compatible response headers.
+
+    Returns ``True`` only when a zero remaining quota and a future reset are
+    both present.  Header names intentionally accept the standard, Groq /
+    SambaNova, and Cerebras resource-qualified variants.
+    """
+    if not headers:
+        return False
+    try:
+        values = {str(key).lower().replace("_", "-"): value for key, value in headers.items()}
+    except AttributeError:
+        return False
+
+    resets = []
+    for name, value in values.items():
+        if "ratelimit-remaining" not in name:
+            continue
+        try:
+            if float(value) <= 0:
+                reset_name = name.replace("ratelimit-remaining", "ratelimit-reset", 1)
+                reset_in = parse_rate_limit_reset(values.get(reset_name))
+                if reset_in is not None:
+                    resets.append(reset_in)
+        except (TypeError, ValueError):
+            continue
+    if not resets:
+        return False
+
+    # More than one resource can be empty (e.g. requests and tokens).  Do not
+    # retry until the last exhausted resource has reset.
+    cooldown_seconds = max(resets)
+    if cooldown_seconds <= 0:
+        return False
+    # A reported zero quota is definitive, so it must not wait for the normal
+    # consecutive-failure threshold before opening the route.
+    mark_unavailable(
+        provider,
+        "rate_limit_headers",
+        model=model,
+        cooldown_seconds=cooldown_seconds,
+        is_429_or_5xx=False,
+    )
+    return True
 
 
 def load_state():
