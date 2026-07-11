@@ -85,6 +85,22 @@ TASK_PROFILE_ALIASES = {
     "copywriting": "creative_writing",
 }
 
+# Keep capability filtering canonical, while allowing caller-facing profiles
+# to express a useful cost preference within that capability.
+TASK_PROFILE_COST_PRIORITIES = {
+    "unit_test": ("local", "free-cloud", "paid"),
+    "test": ("local", "free-cloud", "paid"),
+    "docs": ("local", "free-cloud", "paid"),
+    "documentation": ("local", "free-cloud", "paid"),
+    "story": ("local", "free-cloud", "paid"),
+    "copywriting": ("local", "free-cloud", "paid"),
+    "refactor": ("free-cloud", "local", "paid"),
+    "bug_fix": ("free-cloud", "local", "paid"),
+    "bugfix": ("free-cloud", "local", "paid"),
+    "debug": ("free-cloud", "local", "paid"),
+    "code_review": ("free-cloud", "local", "paid"),
+}
+
 
 def _openai_client(api_key_env: str, base_url: str | None = None, default_headers: dict | None = None):
     if OpenAI is None:
@@ -217,6 +233,9 @@ def _task_complexity(prompt: str) -> str:
 
 def _get_cost_priority(cost_tier: str, task_type: str, prompt: str | None = None) -> int:
     normalized = (task_type or "auto").lower().strip()
+    profile_priority = TASK_PROFILE_COST_PRIORITIES.get(normalized)
+    if profile_priority:
+        return profile_priority.index(cost_tier) if cost_tier in profile_priority else 99
     complexity = _task_complexity(prompt or "") if normalized == "auto" else "medium"
     if normalized in ("paid", "openai", "gpt"):
         mapping = {
@@ -268,8 +287,8 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
 
 
 def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
-    normalized = (task_type or "auto").lower().strip()
-    normalized = TASK_PROFILE_ALIASES.get(normalized, normalized)
+    requested = (task_type or "auto").lower().strip()
+    normalized = TASK_PROFILE_ALIASES.get(requested, requested)
     simple_model = "llama-3.1-8b-instant" if normalized in ("simple", "fast", "quick") else "llama-3.3-70b-versatile"
     local_model = os.environ.get("SMART_ROUTER_LOCAL_MODEL", "gemma4:latest")
     paid_model = os.environ.get("SMART_ROUTER_PAID_MODEL", "gpt-4o-mini")
@@ -317,7 +336,7 @@ def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
         if has_available_capable_free:
             routes = capable_routes
 
-    return _sort_routes_by_cost_and_health(routes, task_type, prompt)
+    return _sort_routes_by_cost_and_health(routes, requested, prompt)
 
 
 def _env_available(route: Route) -> bool:
