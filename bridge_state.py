@@ -1,3 +1,39 @@
+"""
+Bridge State Management and Circuit Breaker Controls.
+
+This module tracks the health, latency, rate limits, and error rates of various LLM providers and models.
+It implements two types of circuit breakers:
+
+1. Error-based Circuit Breaker:
+   - Triggered by consecutive failures (such as 429 rate limits or 5xx server errors).
+   - Configured via the `BRIDGE_FAILURE_THRESHOLD` environment variable (default: 3, or 1 in tests).
+   - Once tripped, the provider/model status is set to "open" and it cools off for a specified duration.
+
+2. Latency-based Circuit Breaker:
+   - Triggered by sustained slow calls.
+   - When a successful request exceeds a specific latency threshold, it counts as a slow call.
+   - Configured via:
+     * `SMART_ROUTER_LATENCY_THRESHOLD` (env var) or `DEFAULT_LATENCY_THRESHOLD_SECONDS` (default: 5.0s):
+       The maximum acceptable latency for a request to not be considered "slow".
+     * `BRIDGE_SLOW_CALL_THRESHOLD` (env var) or `DEFAULT_SLOW_CALL_THRESHOLD` (default: 3):
+       The number of consecutive slow calls allowed before the circuit breaker trips.
+   - Once tripped (consecutive slow calls reaches the threshold):
+     * The provider status is set to "open".
+     * The reason is recorded as "high_latency: <count> consecutive calls exceeded <threshold>s".
+     * The provider cools off for `DEFAULT_COOLDOWN_SECONDS` (default: 300s).
+   - Recovery:
+     * The circuit breaker recovers when a successful request is recorded with a latency within the
+       threshold (`latency <= latency_threshold`). This resets `consecutive_slow_calls` to 0 and,
+       if the provider status was "open" due to a "high_latency" reason, restores status to "ok".
+     * Note: A failed request (`success=False`) also resets `consecutive_slow_calls` to 0, which
+       prevents blending of slow-call counts across error bounds, but errors are handled separately
+       by the error-based circuit breaker.
+
+Distinction between Circuit Breakers and Degradation:
+- **Circuit Breaker ("open" status)**: Trips when `consecutive_slow_calls >= slow_call_threshold`. Completely disables the provider/model (`is_available()` returns `False`). Recovers on the first successful fast call.
+- **Degradation ("provider_is_degraded" flag)**: Triggered when average provider latency over a sliding window exceeds threshold, or rate limits occur frequently. Used for routing priority (smart router prefers non-degraded bridges), but does not disable the provider. Recovers gradually as old slow/failed samples roll off the 10-sample sliding window.
+"""
+
 import json
 import os
 import sys
@@ -268,7 +304,30 @@ def raise_if_unavailable(provider, model=None):
 
 
 def record_metric(provider, model, latency, success, is_rate_limit=False):
-    """Record route health and open the provider circuit after sustained slowness."""
+    """
+    Record route health and latency metrics, updating circuit breaker states.
+    
+    This function tracks recent latency and success metrics for both model and provider levels,
+    maintaining a sliding window of the last 10 samples. It also manages the latency-based
+    circuit breaker:
+    
+    - If `success` is True and `latency` exceeds the configured `latency_threshold`, the
+      `consecutive_slow_calls` count for the provider is incremented.
+    - If `consecutive_slow_calls` reaches the `slow_call_threshold`, the provider's circuit is
+      tripped ("open"), forcing a cooldown period.
+    - If `success` is True and `latency` is within the threshold, `consecutive_slow_calls` is
+      reset to 0. If the circuit was previously opened due to high latency, it is automatically
+      recovered back to "ok".
+    - If `success` is False, `consecutive_slow_calls` is reset to 0 (errors are tracked separately
+      by the error-based circuit breaker).
+    
+    Parameters:
+        provider (str): The identifier of the LLM provider (e.g., 'groq-bridge').
+        model (str): The model name (e.g., 'llama-3.3-70b-versatile').
+        latency (float): The request latency in seconds.
+        success (bool): Whether the request succeeded.
+        is_rate_limit (bool): Whether the failure was specifically a 429 rate limit.
+    """
     with SimpleFileLock(LOCK_FILE_PATH):
         state = load_state()
         providers = state.setdefault("providers", {})
