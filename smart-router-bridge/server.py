@@ -317,7 +317,7 @@ def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
         if has_available_capable_free:
             routes = capable_routes
 
-    return _sort_routes_by_cost_and_health(routes, task_type, prompt)
+    return _sort_routes_by_cost_and_health(routes, normalized, prompt)
 
 
 def _env_available(route: Route) -> bool:
