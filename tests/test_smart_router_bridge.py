@@ -319,6 +319,42 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(free_cloud_providers[0], "gemini-bridge")
         self.assertEqual(free_cloud_providers[1], "groq-bridge")
 
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "GEMINI_API_KEY": "gemini-key",
+        "CEREBRAS_API_KEY": "cerebras-key",
+    }, clear=True)
+    def test_provider_capability_score_prioritizes_stronger_coding_route_within_free_tier(self):
+        routes = smart_router._routes_for("coding")
+        free_cloud_providers = [route.provider for route in routes if route.cost_tier == "free-cloud"]
+        self.assertEqual(free_cloud_providers[:3], ["cerebras-bridge", "gemini-bridge", "groq-bridge"])
+
+        score_by_provider = {
+            route.provider: smart_router._route_capability_score(route, "coding")["total"]
+            for route in routes
+            if route.provider in ("cerebras-bridge", "gemini-bridge", "groq-bridge")
+        }
+        self.assertGreater(score_by_provider["cerebras-bridge"], score_by_provider["gemini-bridge"])
+        self.assertGreater(score_by_provider["gemini-bridge"], score_by_provider["groq-bridge"])
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "GEMINI_API_KEY": "gemini-key"}, clear=True)
+    def test_capability_score_includes_historical_latency_component(self):
+        routes = smart_router._routes_for("auto")
+        groq_route = next(route for route in routes if route.provider == "groq-bridge")
+        gemini_route = next(route for route in routes if route.provider == "gemini-bridge")
+
+        initial_groq_score = smart_router._route_capability_score(groq_route, "auto")["total"]
+        initial_gemini_score = smart_router._route_capability_score(gemini_route, "auto")["total"]
+        self.assertEqual(initial_groq_score, initial_gemini_score)
+
+        smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=2.0, success=True)
+        smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=0.5, success=True)
+
+        groq_score = smart_router._route_capability_score(groq_route, "auto")
+        gemini_score = smart_router._route_capability_score(gemini_route, "auto")
+        self.assertGreater(gemini_score["latency"], groq_score["latency"])
+        self.assertGreater(gemini_score["total"], groq_score["total"])
+
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
     def test_successful_ask_smart_persists_latency_metrics(self):
         result = smart_router.ask_smart("metric persistence", "auto")
@@ -1298,6 +1334,13 @@ class TestSmartRouterMissingLibraries(unittest.TestCase):
         data = json.loads(res_router)
         self.assertIn("routes", data)
         self.assertGreater(len(data["routes"]), 0)
+        first_route = data["routes"][0]
+        self.assertIn("capability_score", first_route)
+        self.assertIn("score_components", first_route)
+        self.assertEqual(
+            set(first_route["score_components"]),
+            {"cost", "latency", "capability"},
+        )
 
 
 if __name__ == "__main__":

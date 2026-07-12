@@ -2,7 +2,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, List
+from typing import Callable, List, Mapping
 
 from mcp.server.fastmcp import FastMCP
 
@@ -35,6 +35,7 @@ class Route:
     required_env: str | None
     ask: Callable[..., str]
     capabilities: tuple[str, ...] = ()
+    capability_scores: Mapping[str, float] | None = None
 
 
 # Capability tags per route, used to filter candidates for capability-aware
@@ -100,6 +101,14 @@ TASK_PROFILE_COST_PRIORITIES = {
     "debug": ("free-cloud", "local", "paid"),
     "code_review": ("free-cloud", "local", "paid"),
 }
+
+CAPABILITY_SCORE_WEIGHTS = {
+    "cost": 0.45,
+    "latency": 0.25,
+    "capability": 0.30,
+}
+
+DEFAULT_CAPABILITY_SCORE = 0.55
 
 
 def _openai_client(api_key_env: str, base_url: str | None = None, default_headers: dict | None = None):
@@ -265,9 +274,72 @@ def _get_cost_priority(cost_tier: str, task_type: str, prompt: str | None = None
     return mapping.get(cost_tier, 99)
 
 
+def _score_from_cost_priority(cost_priority: int) -> float:
+    if cost_priority <= 0:
+        return 1.0
+    if cost_priority == 1:
+        return 0.65
+    if cost_priority == 2:
+        return 0.30
+    return 0.0
+
+
+def _score_from_latency(avg_latency: float) -> float:
+    if avg_latency >= 9999.0:
+        return 0.50
+    if avg_latency <= 0:
+        return 1.0
+    latency_threshold = float(os.environ.get(
+        "SMART_ROUTER_LATENCY_THRESHOLD",
+        str(bridge_state.DEFAULT_LATENCY_THRESHOLD_SECONDS),
+    ))
+    # Treat the latency breaker threshold as the lower edge of "slow". Routes
+    # at or above 2x that threshold have no latency advantage, while faster
+    # routes scale linearly up to 1.0.
+    slow_edge = max(latency_threshold * 2, 0.001)
+    return max(0.0, min(1.0, 1.0 - (avg_latency / slow_edge)))
+
+
+def _route_capability_fit(route: Route, task_type: str) -> float:
+    normalized = TASK_PROFILE_ALIASES.get((task_type or "auto").lower().strip(), (task_type or "auto").lower().strip())
+    scores = route.capability_scores or {}
+    if normalized in scores:
+        return max(0.0, min(1.0, float(scores[normalized])))
+    if normalized in route.capabilities:
+        return 0.75
+    if normalized in ("auto", "simple", "fast", "quick", "paid", "openai", "gpt", "local", "offline", "private"):
+        return max(0.0, min(1.0, float(scores.get("general", DEFAULT_CAPABILITY_SCORE))))
+    return max(0.0, min(1.0, float(scores.get("general", DEFAULT_CAPABILITY_SCORE))))
+
+
+def _route_capability_score(route: Route, task_type: str, prompt: str | None = None) -> dict:
+    health = bridge_state.get_route_health(route.provider, route.model)
+    cost_priority = _get_cost_priority(route.cost_tier, task_type, prompt)
+    cost_score = _score_from_cost_priority(cost_priority)
+    latency_score = _score_from_latency(health["avg_latency"])
+    capability_score = _route_capability_fit(route, task_type)
+    total = (
+        cost_score * CAPABILITY_SCORE_WEIGHTS["cost"]
+        + latency_score * CAPABILITY_SCORE_WEIGHTS["latency"]
+        + capability_score * CAPABILITY_SCORE_WEIGHTS["capability"]
+    )
+    if not health["is_available"]:
+        total *= 0.25
+    if health.get("provider_is_degraded", False):
+        total *= 0.75
+    total *= health["success_rate"]
+    return {
+        "total": round(total, 4),
+        "cost": round(cost_score, 4),
+        "latency": round(latency_score, 4),
+        "capability": round(capability_score, 4),
+    }
+
+
 def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt: str | None = None) -> List[Route]:
     def sort_key(route):
         health = bridge_state.get_route_health(route.provider, route.model)
+        score = _route_capability_score(route, task_type, prompt)["total"]
         # 1. Availability status (available first, i.e. 0 for available, 1 for cooling down)
         is_avail_val = 0 if health["is_available"] else 1
         # 2. Cost tier priority (lower value first)
@@ -278,10 +350,12 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
         failures = health["consecutive_failures"]
         # 5. Health: success rate (higher rate first -> negative rate)
         neg_success_rate = -health["success_rate"]
-        # 6. Latency (lower latency first)
+        # 6. Weighted capability score (higher score first)
+        neg_score = -score
+        # 7. Latency (lower latency first)
         latency = health["avg_latency"]
 
-        return (is_avail_val, cost_prio, is_degraded, failures, neg_success_rate, latency)
+        return (is_avail_val, cost_prio, is_degraded, failures, neg_success_rate, neg_score, latency)
 
     return sorted(routes, key=sort_key)
 
@@ -295,18 +369,24 @@ def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
 
     free_routes = [
         Route("groq-bridge", simple_model, "free-cloud", "GROQ_API_KEY", _ask_groq,
-              ("coding", "general", "simple_extraction")),
+              ("coding", "general", "simple_extraction"),
+              {"general": 0.72, "coding": 0.70, "simple_extraction": 0.84}),
         Route("gemini-bridge", "gemini-2.5-flash", "free-cloud", "GEMINI_API_KEY", _ask_gemini,
-              ("coding", "creative_writing", "general")),
+              ("coding", "creative_writing", "general"),
+              {"general": 0.72, "coding": 0.76, "creative_writing": 0.86}),
         Route("cerebras-bridge", "gpt-oss-120b", "free-cloud", "CEREBRAS_API_KEY", _ask_cerebras,
-              ("coding", "general")),
+              ("coding", "general"),
+              {"general": 0.72, "coding": 0.82}),
         Route("openrouter-bridge", "nvidia/nemotron-3-super-120b-a12b:free", "free-cloud", "OPENROUTER_API_KEY", _ask_openrouter,
-              ("general", "simple_extraction")),
+              ("general", "simple_extraction"),
+              {"general": 0.70, "simple_extraction": 0.78}),
         Route("hf-bridge", local_model, "local", None, _ask_hf,
-              ("general", "simple_extraction")),
+              ("general", "simple_extraction"),
+              {"general": 0.58, "simple_extraction": 0.68}),
     ]
     paid_routes = [Route("gpt-bridge", paid_model, "paid", "OPENAI_API_KEY", _ask_gpt,
-                          ("coding", "creative_writing", "general", "simple_extraction"))]
+                          ("coding", "creative_writing", "general", "simple_extraction"),
+                          {"general": 0.86, "coding": 0.90, "creative_writing": 0.88, "simple_extraction": 0.86})]
 
     paid_requested = normalized in ("paid", "openai", "gpt")
     allow_paid_fallback = os.environ.get("SMART_ROUTER_ALLOW_PAID_FALLBACK", "").lower() in ("1", "true", "yes", "on")
@@ -487,10 +567,18 @@ def get_smart_router_status() -> str:
     route_details = []
     for r in routes:
         health = bridge_state.get_route_health(r.provider, r.model)
+        score = _route_capability_score(r, "auto")
         route_details.append({
             "provider": r.provider,
             "model": r.model,
             "cost_tier": r.cost_tier,
+            "capabilities": list(r.capabilities),
+            "capability_score": score["total"],
+            "score_components": {
+                "cost": score["cost"],
+                "latency": score["latency"],
+                "capability": score["capability"],
+            },
             "env_configured": _env_available(r),
             "library_installed": _library_available(r),
             "is_available": health["is_available"],
