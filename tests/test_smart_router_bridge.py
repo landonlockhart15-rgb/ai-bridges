@@ -1342,6 +1342,44 @@ class TestSmartRouterMissingLibraries(unittest.TestCase):
             {"cost", "latency", "capability"},
         )
 
+    def test_bridges_status_resource_reads_status_cache(self):
+        import json
+        import time
+
+        cache_path = Path(smart_router.bridge_state.STATUS_CACHE_FILE)
+        cache_data = {
+            "timestamp": time.time(),
+            "bridges": {
+                "groq-bridge": {
+                    "id": "groq-bridge",
+                    "status": "🟢 Online",
+                    "latency": "12 ms",
+                    "details": "Cache hit",
+                }
+            },
+        }
+
+        if cache_path.exists():
+            try:
+                cache_path.unlink()
+            except OSError:
+                pass
+
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f)
+
+            res = smart_router.mcp.resources["get_bridges_status"]()
+            data = json.loads(res)
+            self.assertEqual(data["bridges"]["groq-bridge"]["status"], "🟢 Online")
+            self.assertEqual(data["bridges"]["groq-bridge"]["details"], "Cache hit")
+        finally:
+            if cache_path.exists():
+                try:
+                    cache_path.unlink()
+                except OSError:
+                    pass
+
 
 if __name__ == "__main__":
     unittest.main()

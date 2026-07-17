@@ -242,6 +242,22 @@ def load_status_cache():
         return None
 
 
+def write_status_cache(cache_data):
+    try:
+        temp_path = STATUS_CACHE_FILE + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, indent=2, sort_keys=True)
+        if os.path.exists(STATUS_CACHE_FILE):
+            os.remove(STATUS_CACHE_FILE)
+        os.rename(temp_path, STATUS_CACHE_FILE)
+    except Exception:
+        try:
+            with open(STATUS_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, indent=2, sort_keys=True)
+        except Exception:
+            pass
+
+
 def save_state(state):
     try:
         temp_path = STATE_FILE_PATH + ".tmp"
