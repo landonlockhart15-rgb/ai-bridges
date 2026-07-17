@@ -545,15 +545,10 @@ def get_bridges_status() -> str:
     """
     Get the cached health and diagnostics status of all AI bridges.
     """
-    status_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".bridge_status.json")
-    if os.path.exists(status_file):
-        try:
-            with open(status_file, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception as e:
-            import json
-            return json.dumps({"error": f"Failed to read cache: {str(e)}"}, indent=2)
     import json
+    cache = bridge_state.load_status_cache()
+    if cache is not None:
+        return json.dumps(cache, indent=2)
     return json.dumps({"error": "Status cache file not found. Run check_bridges.py to generate it."}, indent=2)
 
 
