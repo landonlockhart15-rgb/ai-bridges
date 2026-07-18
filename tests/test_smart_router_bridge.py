@@ -108,6 +108,41 @@ class TestSmartRouterBridge(unittest.TestCase):
         tiers = [route.cost_tier for route in routes]
         self.assertEqual(tiers, ["free-cloud", "free-cloud", "free-cloud", "free-cloud", "local"])
 
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
+    def test_provider_heartbeat_records_free_and_local_metrics_without_paid_probe(self):
+        routes = [
+            smart_router.Route("groq-bridge", "groq-model", "free-cloud", "GROQ_API_KEY", lambda *_: "OK"),
+            smart_router.Route("hf-bridge", "local-model", "local", None, lambda *_: "OK"),
+            smart_router.Route("gpt-bridge", "paid-model", "paid", "OPENAI_API_KEY", lambda *_: "paid"),
+        ]
+        with patch.object(smart_router, "_routes_for", return_value=routes), \
+             patch.object(smart_router.bridge_state, "is_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "mark_available") as mark_available, \
+             patch.object(smart_router.bridge_state, "record_metric") as record_metric, \
+             patch.object(smart_router.usage_tracker, "check_budget"):
+            results = smart_router.run_provider_heartbeat()
+
+        self.assertEqual([item["provider"] for item in results], ["groq-bridge", "hf-bridge"])
+        self.assertEqual(mark_available.call_count, 2)
+        self.assertEqual(record_metric.call_count, 2)
+        self.assertTrue(all(call.kwargs["success"] for call in record_metric.call_args_list))
+
+    def test_provider_heartbeat_marks_failed_route_unavailable(self):
+        route = smart_router.Route(
+            "hf-bridge", "local-model", "local", None,
+            lambda *_: (_ for _ in ()).throw(RuntimeError("offline")),
+        )
+        with patch.object(smart_router, "_routes_for", return_value=[route]), \
+             patch.object(smart_router.bridge_state, "is_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "record_metric") as record_metric, \
+             patch.object(smart_router.bridge_state, "mark_unavailable") as mark_unavailable, \
+             patch.object(smart_router.usage_tracker, "check_budget"):
+            results = smart_router.run_provider_heartbeat()
+
+        self.assertFalse(results[0]["available"])
+        self.assertEqual(record_metric.call_args.kwargs["success"], False)
+        mark_unavailable.assert_called_once_with("hf-bridge", "RuntimeError", model="local-model")
+
     @patch.dict("os.environ", {
         "OPENAI_API_KEY": "paid-key",
         "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",

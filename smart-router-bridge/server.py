@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, List, Mapping
@@ -25,6 +26,10 @@ import usage_tracker
 
 mcp = FastMCP("smart-router-bridge")
 PROVIDER = "smart-router-bridge"
+HEARTBEAT_PROMPT = "Reply with OK only."
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
+_heartbeat_thread = None
+_heartbeat_stop = None
 
 
 @dataclass(frozen=True)
@@ -464,6 +469,66 @@ def _should_fallback(exc: Exception) -> bool:
     return True
 
 
+def run_provider_heartbeat() -> list[dict]:
+    """Probe configured free/local routes and refresh their live metrics.
+
+    Heartbeats deliberately use the existing route call functions and never
+    include paid routes.  A failed probe updates the same circuit-breaker
+    state used by normal requests, so routing immediately reflects both
+    availability and latency without adding a second health model.
+    """
+    results = []
+    for route in _routes_for("auto"):
+        if route.cost_tier == "paid" or not _library_available(route) or not _env_available(route):
+            continue
+        if not bridge_state.is_available(route.provider, route.model):
+            continue
+        try:
+            usage_tracker.check_budget(route.provider, route.model)
+        except ValueError:
+            # Budget/quota state is already reflected by bridge_state health;
+            # do not convert it into a transport-failure cooldown.
+            continue
+        started = time.monotonic()
+        try:
+            route.ask(HEARTBEAT_PROMPT, route)
+        except Exception as exc:
+            latency = time.monotonic() - started
+            bridge_state.record_metric(route.provider, route.model, latency, success=False)
+            bridge_state.mark_unavailable(route.provider, exc.__class__.__name__, model=route.model)
+            results.append({"provider": route.provider, "model": route.model, "available": False, "latency": latency})
+        else:
+            latency = time.monotonic() - started
+            bridge_state.mark_available(route.provider, route.model)
+            bridge_state.record_metric(route.provider, route.model, latency, success=True)
+            results.append({"provider": route.provider, "model": route.model, "available": True, "latency": latency})
+    return results
+
+
+def start_provider_heartbeat() -> threading.Event:
+    """Start the idempotent background heartbeat worker for the bridge server."""
+    global _heartbeat_thread, _heartbeat_stop
+    if _heartbeat_thread is not None and _heartbeat_thread.is_alive():
+        return _heartbeat_stop
+    try:
+        interval = max(5.0, float(os.environ.get(
+            "SMART_ROUTER_HEARTBEAT_INTERVAL_SECONDS",
+            str(DEFAULT_HEARTBEAT_INTERVAL_SECONDS),
+        )))
+    except ValueError:
+        interval = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    _heartbeat_stop = threading.Event()
+
+    def worker():
+        while not _heartbeat_stop.is_set():
+            run_provider_heartbeat()
+            _heartbeat_stop.wait(interval)
+
+    _heartbeat_thread = threading.Thread(target=worker, name="smart-router-heartbeat", daemon=True)
+    _heartbeat_thread.start()
+    return _heartbeat_stop
+
+
 @mcp.tool()
 def ask_smart(prompt: str, task_type: str = "auto") -> str:
     """
@@ -604,4 +669,5 @@ def get_smart_router_status() -> str:
 
 
 if __name__ == "__main__":
+    start_provider_heartbeat()
     mcp.run(transport="stdio")
