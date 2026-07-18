@@ -180,8 +180,15 @@ def get_budget_caps():
     daily_cap_env = os.environ.get("DAILY_BUDGET_CAP")
     monthly_cap_env = os.environ.get("MONTHLY_BUDGET_CAP")
     
-    daily_cap = float(daily_cap_env) if daily_cap_env is not None and daily_cap_env != "" else None
-    monthly_cap = float(monthly_cap_env) if monthly_cap_env is not None and monthly_cap_env != "" else None
+    try:
+        daily_cap = float(daily_cap_env) if daily_cap_env is not None and daily_cap_env != "" else None
+    except (ValueError, TypeError):
+        daily_cap = None
+        
+    try:
+        monthly_cap = float(monthly_cap_env) if monthly_cap_env is not None and monthly_cap_env != "" else None
+    except (ValueError, TypeError):
+        monthly_cap = None
     
     db = load_usage_db()
     config = db.get("config", {})
@@ -244,11 +251,30 @@ def get_provider_budget_caps(provider):
     if soft_cap_ratio_env is None:
         soft_cap_ratio_env = os.environ.get("PROVIDER_SOFT_CAP_RATIO")
 
-    daily_cap = float(daily_cap_env) if daily_cap_env is not None and daily_cap_env != "" else None
-    monthly_cap = float(monthly_cap_env) if monthly_cap_env is not None and monthly_cap_env != "" else None
-    daily_token_cap = int(daily_token_env) if daily_token_env is not None and daily_token_env != "" else None
-    monthly_token_cap = int(monthly_token_env) if monthly_token_env is not None and monthly_token_env != "" else None
-    soft_cap_ratio = float(soft_cap_ratio_env) if soft_cap_ratio_env is not None and soft_cap_ratio_env != "" else 0.8
+    try:
+        daily_cap = float(daily_cap_env) if daily_cap_env is not None and daily_cap_env != "" else None
+    except (ValueError, TypeError):
+        daily_cap = None
+
+    try:
+        monthly_cap = float(monthly_cap_env) if monthly_cap_env is not None and monthly_cap_env != "" else None
+    except (ValueError, TypeError):
+        monthly_cap = None
+
+    try:
+        daily_token_cap = int(daily_token_env) if daily_token_env is not None and daily_token_env != "" else None
+    except (ValueError, TypeError):
+        daily_token_cap = None
+
+    try:
+        monthly_token_cap = int(monthly_token_env) if monthly_token_env is not None and monthly_token_env != "" else None
+    except (ValueError, TypeError):
+        monthly_token_cap = None
+
+    try:
+        soft_cap_ratio = float(soft_cap_ratio_env) if soft_cap_ratio_env is not None and soft_cap_ratio_env != "" else 0.8
+    except (ValueError, TypeError):
+        soft_cap_ratio = 0.8
 
     db = load_usage_db()
     provider_config = db.get("config", {}).get("providers", {}).get(provider, {})
