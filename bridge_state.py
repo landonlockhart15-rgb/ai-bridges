@@ -369,6 +369,13 @@ def mark_available(provider, model=None):
 
 
 def is_available(provider, model=None):
+    try:
+        import usage_tracker
+        if usage_tracker.check_provider_budget(provider)["is_exceeded"]:
+            return False
+    except Exception:
+        pass
+
     cache = load_status_cache()
     if cache and "bridges" in cache:
         bridge_info = cache["bridges"].get(provider)
@@ -546,6 +553,7 @@ def get_route_health(provider, model):
       - provider_avg_latency (float)
       - provider_is_degraded (bool)
       - consecutive_slow_calls (int)
+      - is_soft_capped (bool)
     """
     state = load_state()
     provider_state = state.get("providers", {}).get(provider, {})
@@ -562,6 +570,17 @@ def get_route_health(provider, model):
     provider_avail = _entry_is_available(provider_state) and not cache_offline
     model_avail = _entry_is_available(model_state) and not cache_offline
     is_avail = provider_avail and model_avail
+
+    # Check provider budget caps
+    is_soft_capped = False
+    try:
+        import usage_tracker
+        budget_status = usage_tracker.check_provider_budget(provider)
+        if budget_status["is_exceeded"]:
+            is_avail = False
+        is_soft_capped = budget_status["is_soft_capped"]
+    except Exception:
+        pass
 
     # Get consecutive failures
     provider_failures = provider_state.get("consecutive_failures", 0)
@@ -599,6 +618,7 @@ def get_route_health(provider, model):
         "provider_avg_latency": provider_avg_latency,
         "provider_is_degraded": provider_is_degraded,
         "consecutive_slow_calls": provider_state.get("consecutive_slow_calls", 0),
+        "is_soft_capped": is_soft_capped,
     }
 
 

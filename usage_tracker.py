@@ -180,8 +180,15 @@ def get_budget_caps():
     daily_cap_env = os.environ.get("DAILY_BUDGET_CAP")
     monthly_cap_env = os.environ.get("MONTHLY_BUDGET_CAP")
     
-    daily_cap = float(daily_cap_env) if daily_cap_env is not None and daily_cap_env != "" else None
-    monthly_cap = float(monthly_cap_env) if monthly_cap_env is not None and monthly_cap_env != "" else None
+    try:
+        daily_cap = float(daily_cap_env) if daily_cap_env is not None and daily_cap_env != "" else None
+    except (ValueError, TypeError):
+        daily_cap = None
+        
+    try:
+        monthly_cap = float(monthly_cap_env) if monthly_cap_env is not None and monthly_cap_env != "" else None
+    except (ValueError, TypeError):
+        monthly_cap = None
     
     db = load_usage_db()
     config = db.get("config", {})
@@ -218,6 +225,169 @@ def check_budget(provider, model):
             f"Monthly budget cap exceeded for paid calls. Limit: ${monthly_cap:.4f}, Current monthly cost: ${monthly_usage:.4f}."
         )
 
+def get_provider_env_var(provider, suffix):
+    """Retrieve provider-specific environment variables in various formats."""
+    normalized = provider.replace("-", "_").upper()
+    val = os.environ.get(f"PROVIDER_{suffix}_{normalized}")
+    if val is not None:
+        return val
+    val = os.environ.get(f"provider_{suffix.lower()}_{provider.replace('-', '_').lower()}")
+    if val is not None:
+        return val
+    val = os.environ.get(f"PROVIDER_{suffix}_{provider.upper()}")
+    if val is not None:
+        return val
+    val = os.environ.get(f"provider_{suffix.lower()}_{provider.lower()}")
+    return val
+
+
+def get_provider_budget_caps(provider):
+    """Retrieve daily and monthly budget caps for a specific provider/bridge."""
+    daily_cap_env = get_provider_env_var(provider, "DAILY_BUDGET")
+    monthly_cap_env = get_provider_env_var(provider, "MONTHLY_BUDGET")
+    daily_token_env = get_provider_env_var(provider, "DAILY_TOKEN_BUDGET")
+    monthly_token_env = get_provider_env_var(provider, "MONTHLY_TOKEN_BUDGET")
+    soft_cap_ratio_env = get_provider_env_var(provider, "SOFT_CAP_RATIO")
+    if soft_cap_ratio_env is None:
+        soft_cap_ratio_env = os.environ.get("PROVIDER_SOFT_CAP_RATIO")
+
+    try:
+        daily_cap = float(daily_cap_env) if daily_cap_env is not None and daily_cap_env != "" else None
+    except (ValueError, TypeError):
+        daily_cap = None
+
+    try:
+        monthly_cap = float(monthly_cap_env) if monthly_cap_env is not None and monthly_cap_env != "" else None
+    except (ValueError, TypeError):
+        monthly_cap = None
+
+    try:
+        daily_token_cap = int(daily_token_env) if daily_token_env is not None and daily_token_env != "" else None
+    except (ValueError, TypeError):
+        daily_token_cap = None
+
+    try:
+        monthly_token_cap = int(monthly_token_env) if monthly_token_env is not None and monthly_token_env != "" else None
+    except (ValueError, TypeError):
+        monthly_token_cap = None
+
+    try:
+        soft_cap_ratio = float(soft_cap_ratio_env) if soft_cap_ratio_env is not None and soft_cap_ratio_env != "" else 0.8
+    except (ValueError, TypeError):
+        soft_cap_ratio = 0.8
+
+    db = load_usage_db()
+    provider_config = db.get("config", {}).get("providers", {}).get(provider, {})
+
+    if daily_cap is None:
+        daily_cap = provider_config.get("daily_budget_cap")
+    if monthly_cap is None:
+        monthly_cap = provider_config.get("monthly_budget_cap")
+    if daily_token_cap is None:
+        daily_token_cap = provider_config.get("daily_token_budget_cap")
+    if monthly_token_cap is None:
+        monthly_token_cap = provider_config.get("monthly_token_budget_cap")
+    if soft_cap_ratio is None or soft_cap_ratio == 0.8:
+        db_soft_cap_ratio = provider_config.get("soft_cap_ratio")
+        if db_soft_cap_ratio is not None:
+            soft_cap_ratio = db_soft_cap_ratio
+
+    return {
+        "daily_budget_cap": daily_cap,
+        "monthly_budget_cap": monthly_cap,
+        "daily_token_budget_cap": daily_token_cap,
+        "monthly_token_budget_cap": monthly_token_cap,
+        "soft_cap_ratio": soft_cap_ratio
+    }
+
+
+def get_provider_usage(provider):
+    """Get the current daily and monthly cost and token usage for a provider."""
+    db = load_usage_db()
+    current_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    current_month = datetime.datetime.now().strftime("%Y-%m")
+
+    daily_data = db.get("daily", {}).get(current_date, {}).get("providers", {}).get(provider, {})
+    monthly_data = db.get("monthly", {}).get(current_month, {}).get("providers", {}).get(provider, {})
+
+    return {
+        "daily_cost": daily_data.get("cost", 0.0),
+        "daily_tokens": daily_data.get("tokens", 0),
+        "monthly_cost": monthly_data.get("cost", 0.0),
+        "monthly_tokens": monthly_data.get("tokens", 0),
+    }
+
+
+def check_provider_budget(provider):
+    """
+    Check provider daily/monthly budget caps (both cost and tokens).
+    Returns a dict with:
+      - is_exceeded (bool): True if any hard cap is exceeded.
+      - is_soft_capped (bool): True if any cap is approaching its soft cap.
+      - message (str): Explanation if exceeded or soft capped.
+    """
+    caps = get_provider_budget_caps(provider)
+    usage = get_provider_usage(provider)
+
+    daily_cost = usage["daily_cost"]
+    daily_tokens = usage["daily_tokens"]
+    monthly_cost = usage["monthly_cost"]
+    monthly_tokens = usage["monthly_tokens"]
+
+    daily_cost_cap = caps["daily_budget_cap"]
+    monthly_cost_cap = caps["monthly_budget_cap"]
+    daily_token_cap = caps["daily_token_budget_cap"]
+    monthly_token_cap = caps["monthly_token_budget_cap"]
+    soft_cap_ratio = caps["soft_cap_ratio"]
+
+    is_exceeded = False
+    is_soft_capped = False
+    msg_parts = []
+
+    # Check Daily Cost
+    if daily_cost_cap is not None:
+        if daily_cost >= daily_cost_cap:
+            is_exceeded = True
+            msg_parts.append(f"daily cost limit exceeded (${daily_cost:.4f}/${daily_cost_cap:.4f})")
+        elif daily_cost >= daily_cost_cap * soft_cap_ratio:
+            is_soft_capped = True
+            msg_parts.append(f"approaching daily cost limit (${daily_cost:.4f}/${daily_cost_cap:.4f})")
+
+    # Check Monthly Cost
+    if monthly_cost_cap is not None:
+        if monthly_cost >= monthly_cost_cap:
+            is_exceeded = True
+            msg_parts.append(f"monthly cost limit exceeded (${monthly_cost:.4f}/${monthly_cost_cap:.4f})")
+        elif monthly_cost >= monthly_cost_cap * soft_cap_ratio:
+            is_soft_capped = True
+            msg_parts.append(f"approaching monthly cost limit (${monthly_cost:.4f}/${monthly_cost_cap:.4f})")
+
+    # Check Daily Tokens
+    if daily_token_cap is not None:
+        if daily_tokens >= daily_token_cap:
+            is_exceeded = True
+            msg_parts.append(f"daily token limit exceeded ({daily_tokens}/{daily_token_cap})")
+        elif daily_tokens >= daily_token_cap * soft_cap_ratio:
+            is_soft_capped = True
+            msg_parts.append(f"approaching daily token limit ({daily_tokens}/{daily_token_cap})")
+
+    # Check Monthly Tokens
+    if monthly_token_cap is not None:
+        if monthly_tokens >= monthly_token_cap:
+            is_exceeded = True
+            msg_parts.append(f"monthly token limit exceeded ({monthly_tokens}/{monthly_token_cap})")
+        elif monthly_tokens >= monthly_token_cap * soft_cap_ratio:
+            is_soft_capped = True
+            msg_parts.append(f"approaching monthly token limit ({monthly_tokens}/{monthly_token_cap})")
+
+    message = ", ".join(msg_parts) if msg_parts else "within budget caps"
+    return {
+        "is_exceeded": is_exceeded,
+        "is_soft_capped": is_soft_capped,
+        "message": message
+    }
+
+
 def record_usage(provider, model, prompt_tokens, completion_tokens):
     """Log the token usage and cost incurred."""
     try:
@@ -249,6 +419,13 @@ def record_usage(provider, model, prompt_tokens, completion_tokens):
         day_data["input_tokens"] += prompt_tokens
         day_data["output_tokens"] += completion_tokens
         
+        day_providers = day_data.setdefault("providers", {})
+        p_day_data = day_providers.setdefault(provider, {"cost": 0.0, "tokens": 0, "input_tokens": 0, "output_tokens": 0})
+        p_day_data["cost"] += cost
+        p_day_data["tokens"] += total_tokens
+        p_day_data["input_tokens"] += prompt_tokens
+        p_day_data["output_tokens"] += completion_tokens
+        
         # 2. Update monthly
         monthly = db.setdefault("monthly", {})
         month_data = monthly.setdefault(current_month, {"cost": 0.0, "tokens": 0, "input_tokens": 0, "output_tokens": 0})
@@ -256,6 +433,13 @@ def record_usage(provider, model, prompt_tokens, completion_tokens):
         month_data["tokens"] += total_tokens
         month_data["input_tokens"] += prompt_tokens
         month_data["output_tokens"] += completion_tokens
+        
+        month_providers = month_data.setdefault("providers", {})
+        p_month_data = month_providers.setdefault(provider, {"cost": 0.0, "tokens": 0, "input_tokens": 0, "output_tokens": 0})
+        p_month_data["cost"] += cost
+        p_month_data["tokens"] += total_tokens
+        p_month_data["input_tokens"] += prompt_tokens
+        p_month_data["output_tokens"] += completion_tokens
         
         # 3. Update providers
         providers = db.setdefault("providers", {})
@@ -288,6 +472,7 @@ def record_usage(provider, model, prompt_tokens, completion_tokens):
             
         save_usage_db(db)
 
+
 def get_bridge_costs(timeframe: str = "all") -> str:
     """Get a summary report of the tokens used and costs incurred across all AI bridges."""
     db = load_usage_db()
@@ -317,6 +502,39 @@ def get_bridge_costs(timeframe: str = "all") -> str:
     lines.append(f"- **Daily Budget Cap Status:** {daily_status}")
     lines.append(f"- **Monthly Budget Cap Status:** {monthly_status}")
     lines.append("")
+
+    # Provider budget limits reporting
+    has_provider_limits = False
+    provider_limit_lines = []
+    known_providers = ["groq-bridge", "gemini-bridge", "cerebras-bridge", "openrouter-bridge", "hf-bridge", "gpt-bridge"]
+    for p in known_providers:
+        caps = get_provider_budget_caps(p)
+        if any(caps.get(k) is not None for k in ["daily_budget_cap", "monthly_budget_cap", "daily_token_budget_cap", "monthly_token_budget_cap"]):
+            has_provider_limits = True
+            status = check_provider_budget(p)
+            status_text = "OK"
+            if status["is_exceeded"]:
+                status_text = "⚠️ EXCEEDED"
+            elif status["is_soft_capped"]:
+                status_text = "⚠️ SOFT-CAP REACHED"
+            
+            limit_desc = []
+            usage = get_provider_usage(p)
+            if caps["daily_budget_cap"] is not None:
+                limit_desc.append(f"Daily Cost: ${usage['daily_cost']:.4f}/${caps['daily_budget_cap']:.4f}")
+            if caps["monthly_budget_cap"] is not None:
+                limit_desc.append(f"Monthly Cost: ${usage['monthly_cost']:.4f}/${caps['monthly_budget_cap']:.4f}")
+            if caps["daily_token_budget_cap"] is not None:
+                limit_desc.append(f"Daily Tokens: {usage['daily_tokens']:,}/{caps['daily_token_budget_cap']:,}")
+            if caps["monthly_token_budget_cap"] is not None:
+                limit_desc.append(f"Monthly Tokens: {usage['monthly_tokens']:,}/{caps['monthly_token_budget_cap']:,}")
+            
+            provider_limit_lines.append(f"- **{p}:** {status_text} ({', '.join(limit_desc)})")
+
+    if has_provider_limits:
+        lines.append("### 🔌 Per-Provider Limits")
+        lines.extend(provider_limit_lines)
+        lines.append("")
     
     lines.append("## 📈 Cost and Usage Summary")
     lines.append("| Timeframe | Cost (USD) | Total Tokens |")

@@ -327,6 +327,13 @@ def _route_capability_score(route: Route, task_type: str, prompt: str | None = N
         total *= 0.25
     if health.get("provider_is_degraded", False):
         total *= 0.75
+
+    # Penalize soft-capped providers for non-critical tasks
+    normalized = TASK_PROFILE_ALIASES.get((task_type or "auto").lower().strip(), (task_type or "auto").lower().strip())
+    is_critical = normalized in ("paid", "openai", "gpt") or _task_complexity(prompt or "") == "complex"
+    if health.get("is_soft_capped", False) and not is_critical:
+        total *= 0.50
+
     total *= health["success_rate"]
     return {
         "total": round(total, 4),
@@ -340,8 +347,14 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
     def sort_key(route):
         health = bridge_state.get_route_health(route.provider, route.model)
         score = _route_capability_score(route, task_type, prompt)["total"]
-        # 1. Availability status (available first, i.e. 0 for available, 1 for cooling down)
+        # 1. Availability status (available first, i.e. 0 for available, 1 for cooling down/exceeded budget)
         is_avail_val = 0 if health["is_available"] else 1
+
+        # Soft-cap penalty: if provider is soft-capped and this is a non-critical task, penalize it by pushing it after non-soft-capped ones.
+        normalized = TASK_PROFILE_ALIASES.get((task_type or "auto").lower().strip(), (task_type or "auto").lower().strip())
+        is_critical = normalized in ("paid", "openai", "gpt") or _task_complexity(prompt or "") == "complex"
+        soft_cap_prio = 1 if (health.get("is_soft_capped", False) and not is_critical) else 0
+
         # 2. Cost tier priority (lower value first)
         cost_prio = _get_cost_priority(route.cost_tier, task_type, prompt)
         # 3. Provider degradation status (healthy first, i.e. 0 for healthy, 1 for degraded)
@@ -355,7 +368,7 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
         # 7. Latency (lower latency first)
         latency = health["avg_latency"]
 
-        return (is_avail_val, cost_prio, is_degraded, failures, neg_success_rate, neg_score, latency)
+        return (is_avail_val, soft_cap_prio, cost_prio, is_degraded, failures, neg_success_rate, neg_score, latency)
 
     return sorted(routes, key=sort_key)
 
@@ -582,6 +595,7 @@ def get_smart_router_status() -> str:
             "avg_latency": health["avg_latency"],
             "provider_is_degraded": health.get("provider_is_degraded", False),
             "consecutive_slow_calls": health.get("consecutive_slow_calls", 0),
+            "is_soft_capped": health.get("is_soft_capped", False),
         })
     return json.dumps({
         "timestamp": time.time(),

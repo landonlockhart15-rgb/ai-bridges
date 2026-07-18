@@ -1380,6 +1380,89 @@ class TestSmartRouterMissingLibraries(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_smart_router_soft_cap_routing_priority(self):
+        import os
+        import usage_tracker
+
+        if os.path.exists(usage_tracker.USAGE_FILE_PATH):
+            try:
+                os.remove(usage_tracker.USAGE_FILE_PATH)
+            except OSError:
+                pass
+
+        with patch.dict("os.environ", {
+            "GROQ_API_KEY": "gsk_test_key",
+            "GEMINI_API_KEY": "gemini-key",
+            "PROVIDER_DAILY_TOKEN_BUDGET_GROQ_BRIDGE": "100",
+            "PROVIDER_SOFT_CAP_RATIO_GROQ_BRIDGE": "0.5"
+        }):
+            usage_tracker.record_usage("groq-bridge", "llama-3.3-70b-versatile", 60, 0)
+
+            status = usage_tracker.check_provider_budget("groq-bridge")
+            self.assertTrue(status["is_soft_capped"])
+            self.assertFalse(status["is_exceeded"])
+
+            health = smart_router.bridge_state.get_route_health("groq-bridge", "llama-3.3-70b-versatile")
+            self.assertTrue(health["is_soft_capped"])
+            self.assertTrue(health["is_available"])
+
+            routes = [
+                smart_router.Route(
+                    "groq-bridge",
+                    "llama-3.3-70b-versatile",
+                    "free-cloud",
+                    None,
+                    lambda *args, **kwargs: "soft",
+                    ("general",),
+                    {"general": 0.72},
+                ),
+                smart_router.Route(
+                    "gemini-bridge",
+                    "gemini-2.5-flash",
+                    "free-cloud",
+                    None,
+                    lambda *args, **kwargs: "healthy",
+                    ("general",),
+                    {"general": 0.72},
+                ),
+            ]
+            health_map = {
+                "groq-bridge": {
+                    "is_available": True,
+                    "is_soft_capped": True,
+                    "provider_is_degraded": False,
+                    "consecutive_failures": 0,
+                    "success_rate": 1.0,
+                    "avg_latency": 0.1,
+                },
+                "gemini-bridge": {
+                    "is_available": True,
+                    "is_soft_capped": False,
+                    "provider_is_degraded": False,
+                    "consecutive_failures": 0,
+                    "success_rate": 1.0,
+                    "avg_latency": 0.1,
+                },
+            }
+            with patch.object(smart_router.bridge_state, "get_route_health", side_effect=lambda provider, model: health_map[provider]):
+                ordered_auto = smart_router._sort_routes_by_cost_and_health(routes, "auto", prompt="summarize this text")
+                self.assertEqual([route.provider for route in ordered_auto], ["gemini-bridge", "groq-bridge"])
+
+                ordered_paid = smart_router._sort_routes_by_cost_and_health(routes, "paid", prompt="summarize this text")
+                self.assertEqual([route.provider for route in ordered_paid], ["groq-bridge", "gemini-bridge"])
+
+                score_non_critical = smart_router._route_capability_score(
+                    routes[0],
+                    "auto",
+                    "summarize this text",
+                )
+                score_critical = smart_router._route_capability_score(
+                    routes[0],
+                    "paid",
+                    "summarize this text",
+                )
+                self.assertAlmostEqual(score_critical["total"], round(score_non_critical["total"] * 2, 4))
+
 
 if __name__ == "__main__":
     unittest.main()

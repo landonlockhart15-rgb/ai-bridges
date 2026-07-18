@@ -132,6 +132,77 @@ class TestUsageTracker(unittest.TestCase):
         report = usage_tracker.get_bridge_costs()
         self.assertIn("⚠️ EXCEEDED", report)
 
+    @patch.dict("os.environ", {
+        "PROVIDER_DAILY_BUDGET_OPENROUTER_BRIDGE": "0.005",
+        "PROVIDER_MONTHLY_BUDGET_OPENROUTER_BRIDGE": "0.10",
+        "PROVIDER_DAILY_TOKEN_BUDGET_OPENROUTER_BRIDGE": "10000",
+        "PROVIDER_SOFT_CAP_RATIO_OPENROUTER_BRIDGE": "0.5"
+    })
+    def test_provider_budgets(self):
+        # 1. Check configs are read properly from env
+        caps = usage_tracker.get_provider_budget_caps("openrouter-bridge")
+        self.assertEqual(caps["daily_budget_cap"], 0.005)
+        self.assertEqual(caps["monthly_budget_cap"], 0.10)
+        self.assertEqual(caps["daily_token_budget_cap"], 10000)
+        self.assertEqual(caps["soft_cap_ratio"], 0.5)
+
+        # 2. Check no usage first
+        usage = usage_tracker.get_provider_usage("openrouter-bridge")
+        self.assertEqual(usage["daily_cost"], 0.0)
+        self.assertEqual(usage["daily_tokens"], 0)
+
+        # 3. record_usage and verify provider stats accumulate daily/monthly
+        usage_tracker.record_usage("openrouter-bridge", "gpt-4o", 1000, 0)
+        usage = usage_tracker.get_provider_usage("openrouter-bridge")
+        expected_cost = 1000 * (2.50 / 1e6) # 0.0025
+        self.assertAlmostEqual(usage["daily_cost"], expected_cost)
+        self.assertEqual(usage["daily_tokens"], 1000)
+
+        # 4. Check budget status - should be soft-capped (cost >= 0.005 * 0.5 = 0.0025)
+        status = usage_tracker.check_provider_budget("openrouter-bridge")
+        self.assertFalse(status["is_exceeded"])
+        self.assertTrue(status["is_soft_capped"])
+
+        # 5. Add more usage to exceed daily cost limit
+        usage_tracker.record_usage("openrouter-bridge", "gpt-4o", 2000, 0) # total 3000 tokens, cost 0.0075 (> 0.005 cap)
+        status = usage_tracker.check_provider_budget("openrouter-bridge")
+        self.assertTrue(status["is_exceeded"])
+
+        # 6. Verify report contains per-provider limits
+        report = usage_tracker.get_bridge_costs()
+        self.assertIn("Per-Provider Limits", report)
+        self.assertIn("openrouter-bridge", report)
+        self.assertIn("EXCEEDED", report)
+
+    def test_provider_budget_caps_falls_back_to_db_on_malformed_env(self):
+        db = usage_tracker.load_usage_db()
+        db.setdefault("config", {}).setdefault("providers", {})["openrouter-bridge"] = {
+            "daily_budget_cap": 0.0125,
+            "monthly_budget_cap": 0.25,
+            "daily_token_budget_cap": 25000,
+            "monthly_token_budget_cap": 50000,
+            "soft_cap_ratio": 0.6,
+        }
+        usage_tracker.save_usage_db(db)
+
+        with patch.dict("os.environ", {
+            "PROVIDER_DAILY_BUDGET_OPENROUTER_BRIDGE": "not-a-number",
+            "PROVIDER_MONTHLY_BUDGET_OPENROUTER_BRIDGE": "still-not-a-number",
+            "PROVIDER_DAILY_TOKEN_BUDGET_OPENROUTER_BRIDGE": "bad",
+            "PROVIDER_MONTHLY_TOKEN_BUDGET_OPENROUTER_BRIDGE": "worse",
+            "PROVIDER_SOFT_CAP_RATIO_OPENROUTER_BRIDGE": "nan?",
+        }, clear=True):
+            try:
+                caps = usage_tracker.get_provider_budget_caps("openrouter-bridge")
+            except Exception as exc:
+                self.fail(f"Malformed provider budget env should fall back to DB config, not raise: {exc}")
+
+        self.assertEqual(caps["daily_budget_cap"], 0.0125)
+        self.assertEqual(caps["monthly_budget_cap"], 0.25)
+        self.assertEqual(caps["daily_token_budget_cap"], 25000)
+        self.assertEqual(caps["monthly_token_budget_cap"], 50000)
+        self.assertEqual(caps["soft_cap_ratio"], 0.6)
+
 
 class TestSimpleFileLock(unittest.TestCase):
     def setUp(self):
