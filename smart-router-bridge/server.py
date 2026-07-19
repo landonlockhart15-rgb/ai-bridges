@@ -89,6 +89,10 @@ TASK_PROFILE_ALIASES = {
     "documentation": "simple_extraction",
     "story": "creative_writing",
     "copywriting": "creative_writing",
+    "fast": "fast",
+    "quick": "fast",
+    "reliable": "reliable",
+    "high_reliability": "reliable",
 }
 
 # Keep capability filtering canonical, while allowing caller-facing profiles
@@ -105,13 +109,32 @@ TASK_PROFILE_COST_PRIORITIES = {
     "bugfix": ("free-cloud", "local", "paid"),
     "debug": ("free-cloud", "local", "paid"),
     "code_review": ("free-cloud", "local", "paid"),
+    "fast": ("free-cloud", "local", "paid"),
+    "quick": ("free-cloud", "local", "paid"),
+    "reliable": ("free-cloud", "local", "paid"),
+    "high_reliability": ("free-cloud", "local", "paid"),
 }
 
-CAPABILITY_SCORE_WEIGHTS = {
-    "cost": 0.45,
-    "latency": 0.25,
-    "capability": 0.30,
+ROUTING_PROFILE_WEIGHTS = {
+    "fast": {"cost": 0.25, "latency": 0.50, "capability": 0.25},
+    "quick": {"cost": 0.25, "latency": 0.50, "capability": 0.25},
+    "reliable": {"cost": 0.35, "latency": 0.15, "capability": 0.50},
+    "high_reliability": {"cost": 0.35, "latency": 0.15, "capability": 0.50},
+    "balanced": {"cost": 0.45, "latency": 0.25, "capability": 0.30},
 }
+
+CAPABILITY_SCORE_WEIGHTS = ROUTING_PROFILE_WEIGHTS["balanced"]
+
+
+def _get_routing_weights(task_type: str) -> dict:
+    normalized = (task_type or "auto").lower().strip()
+    alias = TASK_PROFILE_ALIASES.get(normalized, normalized)
+    if alias in ROUTING_PROFILE_WEIGHTS:
+        return ROUTING_PROFILE_WEIGHTS[alias]
+    if normalized in ROUTING_PROFILE_WEIGHTS:
+        return ROUTING_PROFILE_WEIGHTS[normalized]
+    return ROUTING_PROFILE_WEIGHTS["balanced"]
+
 
 DEFAULT_CAPABILITY_SCORE = 0.55
 
@@ -323,10 +346,11 @@ def _route_capability_score(route: Route, task_type: str, prompt: str | None = N
     cost_score = _score_from_cost_priority(cost_priority)
     latency_score = _score_from_latency(health["avg_latency"])
     capability_score = _route_capability_fit(route, task_type)
+    weights = _get_routing_weights(task_type)
     total = (
-        cost_score * CAPABILITY_SCORE_WEIGHTS["cost"]
-        + latency_score * CAPABILITY_SCORE_WEIGHTS["latency"]
-        + capability_score * CAPABILITY_SCORE_WEIGHTS["capability"]
+        cost_score * weights["cost"]
+        + latency_score * weights["latency"]
+        + capability_score * weights["capability"]
     )
     if not health["is_available"]:
         total *= 0.25
@@ -664,7 +688,9 @@ def get_smart_router_status() -> str:
         })
     return json.dumps({
         "timestamp": time.time(),
-        "routes": route_details
+        "routes": route_details,
+        "routing_profiles": ROUTING_PROFILE_WEIGHTS,
+        "latency_heatmap": bridge_state.get_latency_heatmap(),
     }, indent=2)
 
 
