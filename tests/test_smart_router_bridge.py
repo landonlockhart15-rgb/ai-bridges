@@ -1498,7 +1498,34 @@ class TestSmartRouterMissingLibraries(unittest.TestCase):
                 )
                 self.assertAlmostEqual(score_critical["total"], round(score_non_critical["total"] * 2, 4))
 
+    def test_latency_heatmap_generation(self):
+        smart_router.bridge_state.record_metric("groq-bridge", "llama-3.3-70b-versatile", latency=0.2, success=True)
+        smart_router.bridge_state.record_metric("gemini-bridge", "gemini-2.5-flash", latency=2.5, success=True)
+        heatmap = smart_router.bridge_state.get_latency_heatmap()
+        self.assertIn("groq-bridge", heatmap)
+        self.assertIn("gemini-bridge", heatmap)
+        self.assertEqual(heatmap["groq-bridge"]["llama-3.3-70b-versatile"]["latency_tier"], "fast")
+        self.assertEqual(heatmap["gemini-bridge"]["gemini-2.5-flash"]["latency_tier"], "moderate")
+
+    def test_fast_and_reliable_routing_profile_weightings(self):
+        fast_weights = smart_router._get_routing_weights("fast")
+        reliable_weights = smart_router._get_routing_weights("reliable")
+        balanced_weights = smart_router._get_routing_weights("auto")
+
+        self.assertEqual(fast_weights["latency"], 0.50)
+        self.assertEqual(reliable_weights["capability"], 0.50)
+        self.assertEqual(balanced_weights["latency"], 0.25)
+
+    def test_get_smart_router_status_includes_heatmap_and_profiles(self):
+        import json
+        status_raw = smart_router.mcp.resources["get_smart_router_status"]()
+        status = json.loads(status_raw)
+        self.assertIn("latency_heatmap", status)
+        self.assertIn("routing_profiles", status)
+        self.assertIn("fast", status["routing_profiles"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

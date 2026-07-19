@@ -622,4 +622,71 @@ def get_route_health(provider, model):
     }
 
 
+def get_latency_heatmap():
+    """
+    Generate a predictive latency and reliability heatmap for all recorded providers and models.
+
+    Returns a dictionary mapping provider -> model -> heatmap status dict:
+      - avg_latency (float)
+      - success_rate (float)
+      - latency_tier ("fast" | "moderate" | "slow" | "high_latency")
+      - sample_count (int)
+      - status ("ok" | "open")
+    """
+    state = load_state()
+    heatmap = {}
+    providers = state.get("providers", {})
+    for provider, pdata in providers.items():
+        p_heatmap = {}
+        p_latency_history = pdata.get("latency_history", [])
+        p_success_history = pdata.get("success_history", [])
+        p_avg_latency = sum(p_latency_history) / len(p_latency_history) if p_latency_history else 9999.0
+        p_success_rate = sum(p_success_history) / len(p_success_history) if p_success_history else 1.0
+
+        models = pdata.get("models", {})
+        for model, mdata in models.items():
+            l_hist = mdata.get("latency_history", [])
+            s_hist = mdata.get("success_history", [])
+            avg_lat = sum(l_hist) / len(l_hist) if l_hist else p_avg_latency
+            succ_rate = sum(s_hist) / len(s_hist) if s_hist else p_success_rate
+
+            if avg_lat < 1.0:
+                tier = "fast"
+            elif avg_lat <= 3.0:
+                tier = "moderate"
+            elif avg_lat <= 5.0:
+                tier = "slow"
+            else:
+                tier = "high_latency"
+
+            p_heatmap[model] = {
+                "avg_latency": round(avg_lat, 4),
+                "success_rate": round(succ_rate, 4),
+                "latency_tier": tier,
+                "sample_count": len(l_hist),
+                "status": mdata.get("status", "ok"),
+            }
+
+        if not p_heatmap:
+            if p_avg_latency < 1.0:
+                p_tier = "fast"
+            elif p_avg_latency <= 3.0:
+                p_tier = "moderate"
+            elif p_avg_latency <= 5.0:
+                p_tier = "slow"
+            else:
+                p_tier = "high_latency"
+            p_heatmap["_provider_overall"] = {
+                "avg_latency": round(p_avg_latency, 4),
+                "success_rate": round(p_success_rate, 4),
+                "latency_tier": p_tier,
+                "sample_count": len(p_latency_history),
+                "status": pdata.get("status", "ok"),
+            }
+
+        heatmap[provider] = p_heatmap
+    return heatmap
+
+
+
 
