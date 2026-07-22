@@ -146,21 +146,49 @@ class TestSmartRouterBridge(unittest.TestCase):
             failure_class="transient", failure_category="unknown",
         )
 
-    def test_fatal_configuration_errors_do_not_open_the_circuit(self):
+    def test_fatal_authentication_errors_open_the_provider_circuit(self):
         error = RuntimeError("invalid API key")
         failure_class, category = smart_router._classify_provider_error(error)
 
         self.assertEqual((failure_class, category), ("fatal", "authentication"))
         smart_router.bridge_state.mark_unavailable(
-            "groq-bridge", "RuntimeError", model="groq-model",
+            "groq-bridge", "RuntimeError",
             failure_class=failure_class, failure_category=category,
         )
 
         state = smart_router.bridge_state.load_state()
-        model_state = state["providers"]["groq-bridge"]["models"]["groq-model"]
-        self.assertEqual(model_state["status"], "fatal")
-        self.assertEqual(model_state["failure_category"], "authentication")
-        self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "groq-model"))
+        provider_state = state["providers"]["groq-bridge"]
+        self.assertEqual(provider_state["status"], "fatal")
+        self.assertEqual(provider_state["failure_category"], "authentication")
+        self.assertFalse(smart_router.bridge_state.is_available("groq-bridge", "groq-model"))
+
+    def test_fatal_model_error_opens_only_the_model_circuit(self):
+        smart_router.bridge_state.mark_unavailable(
+            "groq-bridge", "NotFoundError", model="missing-model",
+            failure_class="fatal", failure_category="model_not_found",
+        )
+
+        self.assertFalse(smart_router.bridge_state.is_available("groq-bridge", "missing-model"))
+        self.assertTrue(smart_router.bridge_state.is_available("groq-bridge", "working-model"))
+
+    def test_authentication_failure_skips_provider_routes_on_later_attempts(self):
+        failing_ask = MagicMock(side_effect=RuntimeError("invalid API key"))
+        sibling_ask = MagicMock(return_value="should not be called")
+        fallback_ask = MagicMock(return_value="fallback")
+        routes = [
+            smart_router.Route("groq-bridge", "model-a", "free-cloud", None, failing_ask),
+            smart_router.Route("groq-bridge", "model-b", "free-cloud", None, sibling_ask),
+            smart_router.Route("hf-bridge", "local-model", "local", None, fallback_ask),
+        ]
+
+        with patch.object(smart_router, "_routes_for", return_value=routes), \
+             patch.object(smart_router.usage_tracker, "check_budget"):
+            self.assertEqual(smart_router.ask_smart("first"), "fallback")
+            self.assertEqual(smart_router.ask_smart("second"), "fallback")
+
+        failing_ask.assert_called_once()
+        sibling_ask.assert_not_called()
+        self.assertEqual(fallback_ask.call_count, 2)
 
     def test_classifier_marks_model_and_invalid_request_errors_fatal(self):
         self.assertEqual(

@@ -543,7 +543,8 @@ def run_provider_heartbeat() -> list[dict]:
             latency = time.monotonic() - started
             bridge_state.record_metric(route.provider, route.model, latency, success=False)
             failure_class, failure_category = _classify_provider_error(exc)
-            bridge_state.mark_unavailable(route.provider, exc.__class__.__name__, model=route.model,
+            failure_model = None if failure_category == "authentication" else route.model
+            bridge_state.mark_unavailable(route.provider, exc.__class__.__name__, model=failure_model,
                                           failure_class=failure_class, failure_category=failure_category)
             results.append({"provider": route.provider, "model": route.model, "available": False, "latency": latency})
         else:
@@ -665,8 +666,9 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
                     and bridge_state.record_rate_limit_headers(route.provider, route.model, headers)
                 )
                 if not recorded_quota_reset:
+                    failure_model = None if failure_category == "authentication" else route.model
                     bridge_state.mark_unavailable(
-                        route.provider, reason, model=route.model, is_429_or_5xx=is_429_or_5xx,
+                        route.provider, reason, model=failure_model, is_429_or_5xx=is_429_or_5xx,
                         failure_class=failure_class, failure_category=failure_category,
                     )
                 continue

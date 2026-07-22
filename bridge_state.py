@@ -437,9 +437,10 @@ def mark_unavailable(provider, reason, model=None, cooldown_seconds=None, is_429
                      failure_class=None, failure_category=None):
     """Record a provider failure.
 
-    ``failure_class='fatal'`` records an actionable configuration diagnostic
-    without opening a circuit.  Callers that do not classify a failure retain
-    the legacy behavior for compatibility with the individual bridges.
+    ``failure_class='fatal'`` opens the circuit immediately and records an
+    actionable configuration diagnostic.  Callers that do not classify a
+    failure retain the legacy behavior for compatibility with the individual
+    bridges.
     """
     cooldown_seconds = DEFAULT_COOLDOWN_SECONDS if cooldown_seconds is None else cooldown_seconds
     threshold = int(os.environ.get("BRIDGE_FAILURE_THRESHOLD", "1" if IS_TEST else "3"))
@@ -459,7 +460,7 @@ def mark_unavailable(provider, reason, model=None, cooldown_seconds=None, is_429
                 "failure_class": "fatal",
                 "failure_category": failure_category or "configuration",
                 "last_error_at": _iso_timestamp(now),
-                "cooldown_until": 0,
+                "cooldown_until": cooldown_until,
             })
             save_state(state)
             return
