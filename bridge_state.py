@@ -433,7 +433,14 @@ def _entry_is_available(entry, now=None):
     return float(entry.get("cooldown_until", 0) or 0) <= now
 
 
-def mark_unavailable(provider, reason, model=None, cooldown_seconds=None, is_429_or_5xx=False):
+def mark_unavailable(provider, reason, model=None, cooldown_seconds=None, is_429_or_5xx=False,
+                     failure_class=None, failure_category=None):
+    """Record a provider failure.
+
+    ``failure_class='fatal'`` records an actionable configuration diagnostic
+    without opening a circuit.  Callers that do not classify a failure retain
+    the legacy behavior for compatibility with the individual bridges.
+    """
     cooldown_seconds = DEFAULT_COOLDOWN_SECONDS if cooldown_seconds is None else cooldown_seconds
     threshold = int(os.environ.get("BRIDGE_FAILURE_THRESHOLD", "1" if IS_TEST else "3"))
     now = _now()
@@ -443,6 +450,19 @@ def mark_unavailable(provider, reason, model=None, cooldown_seconds=None, is_429
         state = load_state()
         providers = state.setdefault("providers", {})
         provider_state = providers.setdefault(provider, {"status": "ok", "models": {}})
+
+        if failure_class == "fatal":
+            entry = provider_state if model is None else provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
+            entry.update({
+                "status": "fatal",
+                "reason": reason,
+                "failure_class": "fatal",
+                "failure_category": failure_category or "configuration",
+                "last_error_at": _iso_timestamp(now),
+                "cooldown_until": 0,
+            })
+            save_state(state)
+            return
         
         if model is None:
             failures = provider_state.get("consecutive_failures", 0)
@@ -455,6 +475,7 @@ def mark_unavailable(provider, reason, model=None, cooldown_seconds=None, is_429
                         "reason": reason,
                         "last_error_at": _iso_timestamp(now),
                         "cooldown_until": cooldown_until,
+                        "failure_class": "transient",
                     })
                 else:
                     provider_state.update({
@@ -481,6 +502,7 @@ def mark_unavailable(provider, reason, model=None, cooldown_seconds=None, is_429
                         "reason": reason,
                         "last_error_at": _iso_timestamp(now),
                         "cooldown_until": cooldown_until,
+                        "failure_class": "transient",
                     })
                 else:
                     model_state.update({
@@ -507,7 +529,9 @@ def mark_available(provider, model=None):
                 "status": "ok",
                 "reason": None,
                 "cooldown_until": 0,
-                "consecutive_failures": 0
+                "consecutive_failures": 0,
+                "failure_class": None,
+                "failure_category": None,
             })
         else:
             model_state = provider_state.setdefault("models", {}).setdefault(model, {"status": "ok"})
@@ -515,7 +539,9 @@ def mark_available(provider, model=None):
                 "status": "ok",
                 "reason": None,
                 "cooldown_until": 0,
-                "consecutive_failures": 0
+                "consecutive_failures": 0,
+                "failure_class": None,
+                "failure_category": None,
             })
         save_state(state)
 
