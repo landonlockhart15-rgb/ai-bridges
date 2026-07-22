@@ -363,6 +363,9 @@ def _route_capability_score(route: Route, task_type: str, prompt: str | None = N
     if health.get("is_soft_capped", False) and not is_critical:
         total *= 0.50
 
+    if not health.get("token_bucket_available", True):
+        total *= 0.50
+
     total *= health["success_rate"]
     return {
         "total": round(total, 4),
@@ -386,6 +389,8 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
 
         # 2. Cost tier priority (lower value first)
         cost_prio = _get_cost_priority(route.cost_tier, task_type, prompt)
+        # Token bucket status (un-throttled first)
+        is_throttled = 0 if health.get("token_bucket_available", True) else 1
         # 3. Provider degradation status (healthy first, i.e. 0 for healthy, 1 for degraded)
         is_degraded = 1 if health.get("provider_is_degraded", False) else 0
         # 4. Health: consecutive failures count (lower failures first)
@@ -397,9 +402,10 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
         # 7. Latency (lower latency first)
         latency = health["avg_latency"]
 
-        return (is_avail_val, soft_cap_prio, cost_prio, is_degraded, failures, neg_success_rate, neg_score, latency)
+        return (is_avail_val, soft_cap_prio, cost_prio, is_throttled, is_degraded, failures, neg_success_rate, neg_score, latency)
 
     return sorted(routes, key=sort_key)
+
 
 
 def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
@@ -573,9 +579,15 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
         if not bridge_state.is_available(route.provider, route.model):
             errors.append(f"{route.provider}/{route.model}: cooling down")
             continue
-        
+
+        consumed, wait_sec = bridge_state.consume_provider_token(route.provider)
+        if not consumed:
+            errors.append(f"{route.provider}/{route.model}: token bucket throttled (refill in {wait_sec:.1f}s)")
+            continue
+
         called = False
         start_time = time.time()
+
         try:
             usage_tracker.check_budget(route.provider, route.model)
             called = True
@@ -685,7 +697,11 @@ def get_smart_router_status() -> str:
             "provider_is_degraded": health.get("provider_is_degraded", False),
             "consecutive_slow_calls": health.get("consecutive_slow_calls", 0),
             "is_soft_capped": health.get("is_soft_capped", False),
+            "token_bucket_available": health.get("token_bucket_available", True),
+            "token_bucket_tokens": health.get("token_bucket_tokens", 0.0),
+            "token_bucket_wait_seconds": health.get("token_bucket_wait_seconds", 0.0),
         })
+
     return json.dumps({
         "timestamp": time.time(),
         "routes": route_details,

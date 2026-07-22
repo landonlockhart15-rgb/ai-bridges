@@ -49,6 +49,16 @@ STATUS_CACHE_FILE = os.path.join(ROOT_DIR, ".bridge_status_test.json" if IS_TEST
 DEFAULT_COOLDOWN_SECONDS = int(os.environ.get("BRIDGE_STATE_COOLDOWN_SECONDS", "300"))
 DEFAULT_LATENCY_THRESHOLD_SECONDS = 5.0
 DEFAULT_SLOW_CALL_THRESHOLD = 3
+DEFAULT_PROVIDER_RPM = {
+    "groq-bridge": 30.0,
+    "cerebras-bridge": 30.0,
+    "openrouter-bridge": 20.0,
+    "gemini-bridge": 15.0,
+    "hf-bridge": 60.0,
+    "gpt-bridge": 600.0,
+}
+DEFAULT_FALLBACK_RPM = 60.0
+
 
 
 class ProviderUnavailableError(RuntimeError):
@@ -135,6 +145,148 @@ def _now():
 
 def _iso_timestamp(epoch_seconds):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_seconds))
+
+
+class TokenBucket:
+    """
+    Token Bucket rate limiter for managing concurrent requests per provider.
+
+    Attributes:
+        rpm (float): Requests per minute limit.
+        capacity (float): Maximum token capacity (burst size). Defaults to rpm.
+        tokens (float): Currently available tokens in the bucket.
+        last_refill (float): Timestamp of last token replenishment.
+    """
+
+    def __init__(self, rpm: float = 60.0, capacity: float | None = None, tokens: float | None = None, last_refill: float | None = None):
+        self.rpm = max(1.0, float(rpm))
+        self.capacity = max(1.0, float(capacity)) if capacity is not None else self.rpm
+        self.last_refill = float(last_refill) if last_refill is not None else _now()
+        self.tokens = min(self.capacity, max(0.0, float(tokens))) if tokens is not None else self.capacity
+
+    def refill(self, now: float | None = None) -> float:
+        current_time = _now() if now is None else now
+        elapsed = max(0.0, current_time - self.last_refill)
+        refill_rate = self.rpm / 60.0
+        added = elapsed * refill_rate
+        self.tokens = min(self.capacity, self.tokens + added)
+        self.last_refill = current_time
+        return self.tokens
+
+    def try_consume(self, cost: float = 1.0, now: float | None = None) -> tuple[bool, float]:
+        """
+        Attempt to consume `cost` tokens from the bucket.
+
+        Returns:
+            (success, wait_seconds): If success is True, wait_seconds is 0.0.
+            If success is False, wait_seconds is the estimated delay until sufficient tokens refill.
+        """
+        self.refill(now=now)
+        if self.tokens >= cost:
+            self.tokens -= cost
+            return True, 0.0
+        needed = cost - self.tokens
+        refill_rate = self.rpm / 60.0
+        wait_seconds = needed / refill_rate if refill_rate > 0 else 60.0
+        return False, wait_seconds
+
+    def get_status(self, now: float | None = None) -> dict:
+        self.refill(now=now)
+        refill_rate = self.rpm / 60.0
+        wait_seconds = 0.0
+        if self.tokens < 1.0:
+            wait_seconds = (1.0 - self.tokens) / refill_rate if refill_rate > 0 else 60.0
+        return {
+            "rpm": self.rpm,
+            "capacity": self.capacity,
+            "tokens": round(self.tokens, 2),
+            "is_depleted": self.tokens < 1.0,
+            "wait_seconds": round(wait_seconds, 2),
+        }
+
+    def to_dict(self) -> dict:
+        return {
+            "rpm": self.rpm,
+            "capacity": self.capacity,
+            "tokens": self.tokens,
+            "last_refill": self.last_refill,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict, default_rpm: float = 60.0) -> "TokenBucket":
+        if not isinstance(d, dict):
+            return cls(rpm=default_rpm)
+        return cls(
+            rpm=d.get("rpm", default_rpm),
+            capacity=d.get("capacity"),
+            tokens=d.get("tokens"),
+            last_refill=d.get("last_refill"),
+        )
+
+
+def get_provider_rpm(provider: str) -> float:
+    """Retrieve configured RPM for a provider from environment or default table."""
+    try:
+        import usage_tracker
+        env_val = usage_tracker.get_provider_env_var(provider, "RPM")
+        if env_val is not None:
+            return float(env_val)
+    except Exception:
+        pass
+
+    env_direct = os.environ.get(f"PROVIDER_RPM_{provider.replace('-', '_').upper()}")
+    if env_direct is not None:
+        try:
+            return float(env_direct)
+        except ValueError:
+            pass
+
+    return DEFAULT_PROVIDER_RPM.get(provider, DEFAULT_FALLBACK_RPM)
+
+
+def get_token_bucket(provider: str, state: dict | None = None) -> TokenBucket:
+    """Get the current TokenBucket instance for a provider."""
+    rpm = get_provider_rpm(provider)
+    if state is None:
+        state = load_state()
+    pdata = state.get("providers", {}).get(provider, {})
+    tb_data = pdata.get("token_bucket")
+    if tb_data:
+        bucket = TokenBucket.from_dict(tb_data, default_rpm=rpm)
+    else:
+        bucket = TokenBucket(rpm=rpm)
+    bucket.refill()
+    return bucket
+
+
+def consume_provider_token(provider: str, cost: float = 1.0) -> tuple[bool, float]:
+    """
+    Attempt to consume a token from the provider's token bucket.
+    Persists updated bucket state into the shared state file.
+    Returns (success, wait_seconds).
+    """
+    rpm = get_provider_rpm(provider)
+    with SimpleFileLock(LOCK_FILE_PATH):
+        state = load_state()
+        providers = state.setdefault("providers", {})
+        pdata = providers.setdefault(provider, {"status": "ok", "models": {}})
+        tb_data = pdata.get("token_bucket")
+        if tb_data:
+            bucket = TokenBucket.from_dict(tb_data, default_rpm=rpm)
+        else:
+            bucket = TokenBucket(rpm=rpm)
+
+        success, wait_seconds = bucket.try_consume(cost=cost)
+        pdata["token_bucket"] = bucket.to_dict()
+        save_state(state)
+        return success, wait_seconds
+
+
+def is_provider_throttled(provider: str) -> bool:
+    """Return True if the provider's token bucket has fewer than 1 token available."""
+    bucket = get_token_bucket(provider)
+    return bucket.tokens < 1.0
+
 
 
 def parse_rate_limit_reset(value, now=None):
@@ -609,6 +761,10 @@ def get_route_health(provider, model):
     provider_is_frequent_429s = provider_rate_limit_count >= rate_limit_threshold
     provider_is_degraded = provider_is_high_latency or provider_is_frequent_429s
 
+    # Token Bucket rate limit status
+    bucket = get_token_bucket(provider, state=state)
+    tb_status = bucket.get_status()
+
     return {
         "is_available": is_avail,
         "consecutive_failures": consecutive_failures,
@@ -619,7 +775,11 @@ def get_route_health(provider, model):
         "provider_is_degraded": provider_is_degraded,
         "consecutive_slow_calls": provider_state.get("consecutive_slow_calls", 0),
         "is_soft_capped": is_soft_capped,
+        "token_bucket_available": not tb_status["is_depleted"],
+        "token_bucket_tokens": tb_status["tokens"],
+        "token_bucket_wait_seconds": tb_status["wait_seconds"],
     }
+
 
 
 def get_latency_heatmap():
