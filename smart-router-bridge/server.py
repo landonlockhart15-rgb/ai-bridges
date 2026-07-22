@@ -493,6 +493,23 @@ def _is_retryable_error(exc: Exception) -> bool:
     return isinstance(exc, rate_limit_err) or exc.__class__.__name__ in retryable_names
 
 
+def _classify_provider_error(exc: Exception) -> tuple[str, str]:
+    """Classify an upstream failure without coupling routing to SDK internals."""
+    response = getattr(exc, "response", None)
+    status = getattr(exc, "status_code", None) or getattr(response, "status_code", None)
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    if status in (401, 403) or "authentication" in name or "permission" in name or "invalid api key" in message or "unauthorized" in message or "forbidden" in message:
+        return "fatal", "authentication"
+    if status == 404 or "model not found" in message or "unknown model" in message or "no such model" in message:
+        return "fatal", "model_not_found"
+    if status in (400, 422) or "invalid parameter" in message or "invalid request" in message or "bad request" in message:
+        return "fatal", "invalid_parameters"
+    if status == 429 or (isinstance(status, int) and status >= 500) or _is_retryable_error(exc):
+        return "transient", "upstream_or_network"
+    return "transient", "unknown"
+
+
 def _should_fallback(exc: Exception) -> bool:
     if isinstance(exc, ValueError) and "budget cap" in str(exc).lower():
         return False
@@ -525,7 +542,10 @@ def run_provider_heartbeat() -> list[dict]:
         except Exception as exc:
             latency = time.monotonic() - started
             bridge_state.record_metric(route.provider, route.model, latency, success=False)
-            bridge_state.mark_unavailable(route.provider, exc.__class__.__name__, model=route.model)
+            failure_class, failure_category = _classify_provider_error(exc)
+            failure_model = None if failure_category == "authentication" else route.model
+            bridge_state.mark_unavailable(route.provider, exc.__class__.__name__, model=failure_model,
+                                          failure_class=failure_class, failure_category=failure_category)
             results.append({"provider": route.provider, "model": route.model, "available": False, "latency": latency})
         else:
             latency = time.monotonic() - started
@@ -609,6 +629,7 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
             request = _continuation_prompt(best_partial)
             continue
         except Exception as e:
+            failure_class, failure_category = _classify_provider_error(e)
             is_429_or_5xx = False
             is_rate_limit = False
             api_status_err = getattr(openai, "APIStatusError", None) if openai is not None else None
@@ -645,7 +666,11 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
                     and bridge_state.record_rate_limit_headers(route.provider, route.model, headers)
                 )
                 if not recorded_quota_reset:
-                    bridge_state.mark_unavailable(route.provider, reason, model=route.model, is_429_or_5xx=is_429_or_5xx)
+                    failure_model = None if failure_category == "authentication" else route.model
+                    bridge_state.mark_unavailable(
+                        route.provider, reason, model=failure_model, is_429_or_5xx=is_429_or_5xx,
+                        failure_class=failure_class, failure_category=failure_category,
+                    )
                 continue
             raise
 
