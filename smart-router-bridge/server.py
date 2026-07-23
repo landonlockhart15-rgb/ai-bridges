@@ -481,6 +481,35 @@ def _library_available(route: Route) -> bool:
     return True
 
 
+def _preflight_routes(routes: List[Route]) -> tuple[List[Route], list[str]]:
+    """Select routes that are viable before dispatching the primary request.
+
+    This is a read-only telemetry snapshot.  Token consumption and the final
+    availability check remain in ``ask_smart`` so a concurrent request cannot
+    bypass the existing rate limiter or circuit breaker.
+    """
+    viable = []
+    errors = []
+    for route in routes:
+        target = f"{route.provider}/{route.model}"
+        if not _library_available(route):
+            errors.append(f"{target}: required library not installed")
+            continue
+        if not _env_available(route):
+            errors.append(f"{target}: missing {route.required_env}")
+            continue
+        health = bridge_state.get_route_health(route.provider, route.model)
+        if not health["is_available"]:
+            errors.append(f"{target}: cooling down")
+            continue
+        if not health.get("token_bucket_available", True):
+            wait_sec = health.get("token_bucket_wait_seconds", 0.0)
+            errors.append(f"{target}: token bucket throttled (refill in {wait_sec:.1f}s)")
+            continue
+        viable.append(route)
+    return viable, errors
+
+
 def _is_retryable_error(exc: Exception) -> bool:
     retryable_names = {
         "APIConnectionError",
@@ -589,7 +618,9 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
     errors = []
     best_partial = None
     request = prompt
-    for route in _routes_for(task_type, prompt):
+    routes, preflight_errors = _preflight_routes(_routes_for(task_type, prompt))
+    errors.extend(preflight_errors)
+    for route in routes:
         if not _library_available(route):
             errors.append(f"{route.provider}/{route.model}: required library not installed")
             continue
