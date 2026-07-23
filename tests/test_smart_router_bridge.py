@@ -232,6 +232,115 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertEqual(result, "llama-3.3-70b-versatile: hello")
         self.assertEqual(MockOpenAI.calls, [("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile")])
 
+    @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
+    def test_preflight_skips_unavailable_primary_before_dispatch(self):
+        smart_router.bridge_state.mark_unavailable("groq-bridge", "cooldown", model="llama-3.3-70b-versatile")
+        route = smart_router.Route("hf-bridge", "local-model", "local", None, lambda *_: "fallback")
+        with patch.object(smart_router, "_routes_for", return_value=[
+            smart_router.Route("groq-bridge", "primary", "free-cloud", "GROQ_API_KEY", MagicMock()),
+            route,
+        ]), patch.object(smart_router.bridge_state, "get_route_health", side_effect=[
+            {"is_available": False, "token_bucket_available": True},
+            {"is_available": True, "token_bucket_available": True},
+        ]):
+            self.assertEqual(smart_router.ask_smart("hello"), "fallback")
+
+    def test_preflight_reports_depleted_bucket_without_consuming_it(self):
+        routes = [smart_router.Route("groq-bridge", "model", "free-cloud", None, MagicMock())]
+        with patch.object(smart_router, "_library_available", return_value=True), \
+             patch.object(smart_router, "_env_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "get_route_health", return_value={
+                 "is_available": True, "token_bucket_available": False,
+                 "token_bucket_wait_seconds": 2.5,
+             }), patch.object(smart_router.bridge_state, "consume_provider_token") as consume:
+            viable, errors = smart_router._preflight_routes(routes)
+        self.assertEqual(viable, [])
+        self.assertIn("token bucket throttled (refill in 2.5s)", errors[0])
+        consume.assert_not_called()
+
+    def test_preflight_handles_empty_routes_list(self):
+        viable, errors = smart_router._preflight_routes([])
+        self.assertEqual(viable, [])
+        self.assertEqual(errors, [])
+
+    def test_preflight_filters_multiple_routes_with_diverse_failures(self):
+        route1 = smart_router.Route("uninstalled-bridge", "m1", "free-cloud", None, MagicMock())
+        route2 = smart_router.Route("missing-env-bridge", "m2", "free-cloud", "MISSING_ENV_KEY", MagicMock())
+        route3 = smart_router.Route("cooling-bridge", "m3", "free-cloud", None, MagicMock())
+        route4 = smart_router.Route("throttled-bridge", "m4", "free-cloud", None, MagicMock())
+        route5 = smart_router.Route("healthy-bridge", "m5", "local", None, MagicMock())
+
+        def mock_health(provider, model):
+            if provider == "cooling-bridge":
+                return {"is_available": False, "token_bucket_available": True}
+            elif provider == "throttled-bridge":
+                return {"is_available": True, "token_bucket_available": False, "token_bucket_wait_seconds": 3.7}
+            return {"is_available": True, "token_bucket_available": True}
+
+        def mock_lib(route):
+            return route.provider != "uninstalled-bridge"
+
+        with patch.object(smart_router, "_library_available", side_effect=mock_lib), \
+             patch.object(smart_router.bridge_state, "get_route_health", side_effect=mock_health):
+            viable, errors = smart_router._preflight_routes([route1, route2, route3, route4, route5])
+
+        self.assertEqual(viable, [route5])
+        self.assertEqual(len(errors), 4)
+        self.assertIn("uninstalled-bridge/m1: required library not installed", errors[0])
+        self.assertIn("missing-env-bridge/m2: missing MISSING_ENV_KEY", errors[1])
+        self.assertIn("cooling-bridge/m3: cooling down", errors[2])
+        self.assertIn("throttled-bridge/m4: token bucket throttled (refill in 3.7s)", errors[3])
+
+    def test_preflight_all_routes_unviable_raises_provider_unavailable(self):
+        routes = [
+            smart_router.Route("bridge1", "m1", "free-cloud", None, MagicMock()),
+            smart_router.Route("bridge2", "m2", "free-cloud", None, MagicMock()),
+        ]
+        with patch.object(smart_router, "_routes_for", return_value=routes), \
+             patch.object(smart_router.bridge_state, "get_route_health", return_value={"is_available": False}):
+            with self.assertRaises(smart_router.bridge_state.ProviderUnavailableError) as ctx:
+                smart_router.ask_smart("hello")
+            err_msg = str(ctx.exception)
+            self.assertIn("bridge1/m1: cooling down", err_msg)
+            self.assertIn("bridge2/m2: cooling down", err_msg)
+
+    def test_preflight_with_large_and_complex_input(self):
+        huge_prompt = "Explain quantum computing: " + ("A" * 100000)
+        route_healthy = smart_router.Route("hf-bridge", "local-model", "local", None, lambda p, r: "huge_response")
+        with patch.object(smart_router, "_routes_for", return_value=[route_healthy]), \
+             patch.object(smart_router.bridge_state, "get_route_health", return_value={"is_available": True, "token_bucket_available": True}):
+            res = smart_router.ask_smart(huge_prompt, "auto")
+            self.assertEqual(res, "huge_response")
+
+    def test_preflight_concurrency_under_contention(self):
+        import threading
+        primary_route = smart_router.Route("groq-bridge", "llama-3.3-70b-versatile", "free-cloud", None, lambda p, r: "ok")
+        fallback_route = smart_router.Route("hf-bridge", "local-model", "local", None, lambda p, r: "fallback_ok")
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                res = smart_router._preflight_routes([primary_route, fallback_route])
+                results.append(res)
+            except Exception as e:
+                errors.append(e)
+
+        with patch.object(smart_router.bridge_state, "get_route_health", return_value={"is_available": True, "token_bucket_available": True}):
+            threads = [threading.Thread(target=worker) for _ in range(10)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        self.assertEqual(len(errors), 0)
+        self.assertEqual(len(results), 10)
+        for viable, errs in results:
+            self.assertEqual(viable, [primary_route, fallback_route])
+            self.assertEqual(errs, [])
+
+
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key", "OPENAI_API_KEY": "paid-key", "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1"}, clear=True)
     def test_paid_is_last_resort_after_free_rate_limit(self):
         MockOpenAI.failing_models = {"llama-3.3-70b-versatile", "gemma4:latest"}
