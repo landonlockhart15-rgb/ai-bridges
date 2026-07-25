@@ -1436,6 +1436,25 @@ class TestSmartRouterBridge(unittest.TestCase):
             "alpha beta gamma",
         )
 
+    @patch.dict("os.environ", {"SMART_ROUTER_CONTEXT_LIMIT_HF_BRIDGE": "8"}, clear=True)
+    def test_continuation_skips_route_without_context_headroom(self):
+        route = smart_router.Route("hf-bridge", "local-model", "local", None, MagicMock())
+        self.assertFalse(smart_router._continuation_fits(route, "original prompt", "x" * 64))
+
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "OPENAI_API_KEY": "paid-key",
+        "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",
+        "SMART_ROUTER_CONTEXT_LIMIT_HF_BRIDGE": "8",
+    }, clear=True)
+    def test_truncated_response_does_not_call_context_overflow_route(self):
+        MockOpenAI.truncated_models = {"llama-3.3-70b-versatile"}
+        result = smart_router.ask_smart("write something long", "auto")
+        self.assertIn("gpt-4o-mini: Continue the answer", result)
+        self.assertEqual([call[1] for call in MockOpenAI.calls], [
+            "llama-3.3-70b-versatile", "gpt-4o-mini",
+        ])
+
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
     def test_truncated_response_used_as_fallback_when_nothing_completes(self):
         # No paid route configured and the local route is unreachable, so the

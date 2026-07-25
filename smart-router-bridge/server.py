@@ -151,6 +151,18 @@ def _get_routing_weights(task_type: str) -> dict:
 
 DEFAULT_CAPABILITY_SCORE = 0.55
 
+# Conservative input-context defaults for the fallback gate. Providers can
+# override these per route without changing routing code, e.g.
+# SMART_ROUTER_CONTEXT_LIMIT_GROQ_BRIDGE=32768.
+DEFAULT_CONTEXT_LIMITS = {
+    "groq-bridge": 32768,
+    "gemini-bridge": 1048576,
+    "cerebras-bridge": 131072,
+    "openrouter-bridge": 131072,
+    "hf-bridge": 32768,
+    "gpt-bridge": 128000,
+}
+
 
 def _openai_client(api_key_env: str, base_url: str | None = None, default_headers: dict | None = None):
     if OpenAI is None:
@@ -199,6 +211,36 @@ def _merge_continuation(partial: str, continuation: str) -> str:
         if partial[-size:] == continuation[:size]:
             return partial + continuation[size:]
     return partial + continuation
+
+
+def _estimate_tokens(text: str) -> int:
+    """Return a fast, provider-neutral estimate for context budgeting."""
+    return max(1, (len(text or "") + 3) // 4) if text else 0
+
+
+def _route_context_limit(route: Route) -> int:
+    env_name = "SMART_ROUTER_CONTEXT_LIMIT_" + route.provider.upper().replace("-", "_")
+    configured = os.environ.get(env_name)
+    if configured:
+        try:
+            return max(1, int(configured))
+        except ValueError:
+            pass
+    return DEFAULT_CONTEXT_LIMITS.get(route.provider, 32768)
+
+
+def _continuation_fits(route: Route, original_prompt: str, partial: str) -> bool:
+    """Check whether the next route can receive the original request and partial."""
+    continuation_overhead = _estimate_tokens(
+        "Continue the answer below from exactly where it stops. Return only the "
+        "missing continuation; do not repeat any existing text.\n\nExisting answer:\n"
+    )
+    return (
+        _estimate_tokens(original_prompt)
+        + _estimate_tokens(partial)
+        + continuation_overhead
+        <= _route_context_limit(route)
+    )
 
 
 def _ask_openai_compatible(prompt: str, route: Route, base_url: str | None = None, api_key_env: str = "OPENAI_API_KEY",
@@ -698,6 +740,7 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
     errors = []
     best_partial = None
     request = prompt
+    original_prompt = prompt
     routes, preflight_errors = _preflight_routes(_routes_for(task_type, prompt))
     errors.extend(preflight_errors)
 
@@ -716,6 +759,9 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
             continue
         if not bridge_state.is_available(route.provider, route.model):
             errors.append(f"{route.provider}/{route.model}: cooling down")
+            continue
+        if best_partial and not _continuation_fits(route, original_prompt, best_partial):
+            errors.append(f"{route.provider}/{route.model}: continuation exceeds context limit")
             continue
 
         consumed, wait_sec = bridge_state.consume_provider_token(route.provider)
