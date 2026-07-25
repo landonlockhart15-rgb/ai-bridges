@@ -640,19 +640,13 @@ def _speculative_prewarm_routes(routes: List[Route]) -> None:
             started = time.monotonic()
             try:
                 route.ask(HEARTBEAT_PROMPT, route)
-            except Exception as exc:
                 latency = time.monotonic() - started
-                bridge_state.record_metric(route.provider, route.model, latency, success=False)
-                failure_class, failure_category = _classify_provider_error(exc)
-                failure_model = None if failure_category == "authentication" else route.model
-                bridge_state.mark_unavailable(
-                    route.provider, exc.__class__.__name__, model=failure_model,
-                    failure_class=failure_class, failure_category=failure_category
-                )
-            else:
-                latency = time.monotonic() - started
-                bridge_state.mark_available(route.provider, route.model)
                 bridge_state.record_metric(route.provider, route.model, latency, success=True)
+            except Exception:
+                latency = time.monotonic() - started
+                # Probe-only: record metric but never mark_unavailable — a transient
+                # probe failure must not poison the fallback right before ask_smart needs it.
+                bridge_state.record_metric(route.provider, route.model, latency, success=False)
 
     thread = threading.Thread(target=worker, name="speculative-prewarm", daemon=True)
     thread.start()
