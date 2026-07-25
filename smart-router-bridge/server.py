@@ -95,6 +95,19 @@ TASK_PROFILE_ALIASES = {
     "high_reliability": "reliable",
 }
 
+HIGH_PRIORITY_TASK_TYPES = {
+    "coding",
+    "refactor",
+    "bug_fix",
+    "bugfix",
+    "debug",
+    "unit_test",
+    "test",
+    "code_review",
+    "reliable",
+    "high_reliability",
+}
+
 # Keep capability filtering canonical, while allowing caller-facing profiles
 # to express a useful cost preference within that capability.
 TASK_PROFILE_COST_PRIORITIES = {
@@ -608,6 +621,79 @@ def start_provider_heartbeat() -> threading.Event:
     return _heartbeat_stop
 
 
+def _speculative_prewarm_routes(routes: List[Route]) -> None:
+    """Speculatively probe fallback candidate routes in background for high-priority tasks.
+
+    Performs non-blocking background probes on secondary free/local routes to ensure
+    connections and health metrics are fresh if the primary route fails.
+    """
+    def worker():
+        for route in routes:
+            if route.cost_tier == "paid" or not _library_available(route) or not _env_available(route):
+                continue
+            if not bridge_state.is_available(route.provider, route.model):
+                continue
+            try:
+                usage_tracker.check_budget(route.provider, route.model)
+            except ValueError:
+                continue
+            started = time.monotonic()
+            try:
+                route.ask(HEARTBEAT_PROMPT, route)
+            except Exception as exc:
+                latency = time.monotonic() - started
+                bridge_state.record_metric(route.provider, route.model, latency, success=False)
+                failure_class, failure_category = _classify_provider_error(exc)
+                failure_model = None if failure_category == "authentication" else route.model
+                bridge_state.mark_unavailable(
+                    route.provider, exc.__class__.__name__, model=failure_model,
+                    failure_class=failure_class, failure_category=failure_category
+                )
+            else:
+                latency = time.monotonic() - started
+                bridge_state.mark_available(route.provider, route.model)
+                bridge_state.record_metric(route.provider, route.model, latency, success=True)
+
+    thread = threading.Thread(target=worker, name="speculative-prewarm", daemon=True)
+    thread.start()
+
+
+@mcp.tool()
+def prewarm_high_priority_bridges(task_type: str = "coding") -> dict:
+    """
+    Speculatively pre-warm high-priority routes for critical or high-priority task types.
+    Returns status and latency of pre-warmed candidate routes.
+    """
+    routes, _ = _preflight_routes(_routes_for(task_type))
+    results = []
+    for route in routes:
+        if route.cost_tier == "paid" or not _library_available(route) or not _env_available(route):
+            continue
+        if not bridge_state.is_available(route.provider, route.model):
+            continue
+        try:
+            usage_tracker.check_budget(route.provider, route.model)
+        except ValueError:
+            continue
+        started = time.monotonic()
+        try:
+            route.ask(HEARTBEAT_PROMPT, route)
+            latency = time.monotonic() - started
+            bridge_state.mark_available(route.provider, route.model)
+            bridge_state.record_metric(route.provider, route.model, latency, success=True)
+            results.append({"provider": route.provider, "model": route.model, "status": "warmed", "latency": latency})
+        except Exception as exc:
+            latency = time.monotonic() - started
+            failure_class, failure_category = _classify_provider_error(exc)
+            failure_model = None if failure_category == "authentication" else route.model
+            bridge_state.mark_unavailable(
+                route.provider, exc.__class__.__name__, model=failure_model,
+                failure_class=failure_class, failure_category=failure_category
+            )
+            results.append({"provider": route.provider, "model": route.model, "status": "failed", "error": str(exc), "latency": latency})
+    return {"task_type": task_type, "warmed_routes": results}
+
+
 @mcp.tool()
 def ask_smart(prompt: str, task_type: str = "auto") -> str:
     """
@@ -620,6 +706,13 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
     request = prompt
     routes, preflight_errors = _preflight_routes(_routes_for(task_type, prompt))
     errors.extend(preflight_errors)
+
+    normalized_type = TASK_PROFILE_ALIASES.get((task_type or "auto").lower().strip(), (task_type or "auto").lower().strip())
+    is_explicit_paid = normalized_type in ("paid", "openai", "gpt")
+    is_high_priority = not is_explicit_paid and (normalized_type in HIGH_PRIORITY_TASK_TYPES or _task_complexity(prompt) == "complex")
+    if is_high_priority and len(routes) > 1:
+        _speculative_prewarm_routes(routes[1:2])
+
     for route in routes:
         if not _library_available(route):
             errors.append(f"{route.provider}/{route.model}: required library not installed")
