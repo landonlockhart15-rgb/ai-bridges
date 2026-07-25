@@ -1436,16 +1436,16 @@ class TestSmartRouterBridge(unittest.TestCase):
             "alpha beta gamma",
         )
 
-    @patch.dict("os.environ", {"SMART_ROUTER_CONTEXT_LIMIT_HF_BRIDGE": "8"}, clear=True)
-    def test_continuation_skips_route_without_context_headroom(self):
+    @patch.dict("os.environ", {"SMART_ROUTER_MAX_CONTEXT_HF_BRIDGE": "8"}, clear=True)
+    def test_route_context_limit_uses_provider_override(self):
         route = smart_router.Route("hf-bridge", "local-model", "local", None, MagicMock())
-        self.assertFalse(smart_router._continuation_fits(route, "original prompt", "x" * 64))
+        self.assertEqual(smart_router.get_route_max_context_tokens(route), 8)
 
     @patch.dict("os.environ", {
         "GROQ_API_KEY": "gsk_test_key",
         "OPENAI_API_KEY": "paid-key",
         "SMART_ROUTER_ALLOW_PAID_FALLBACK": "1",
-        "SMART_ROUTER_CONTEXT_LIMIT_HF_BRIDGE": "8",
+        "SMART_ROUTER_MAX_CONTEXT_HF_BRIDGE": "8",
     }, clear=True)
     def test_truncated_response_does_not_call_context_overflow_route(self):
         MockOpenAI.truncated_models = {"llama-3.3-70b-versatile"}

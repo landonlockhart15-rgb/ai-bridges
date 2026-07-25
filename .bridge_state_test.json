@@ -1,0 +1,110 @@
+{
+  "providers": {
+    "gemini-bridge": {
+      "consecutive_slow_calls": 0,
+      "latency_history": [
+        2.5
+      ],
+      "models": {
+        "gemini-2.5-flash": {
+          "latency_history": [
+            2.5
+          ],
+          "status": "ok",
+          "success_history": [
+            1
+          ]
+        }
+      },
+      "rate_limit_history": [
+        0
+      ],
+      "status": "ok",
+      "success_history": [
+        1
+      ]
+    },
+    "groq-bridge": {
+      "consecutive_failures": 0,
+      "consecutive_slow_calls": 0,
+      "cooldown_until": 0,
+      "failure_category": null,
+      "failure_class": null,
+      "latency_history": [
+        0.0,
+        0.2
+      ],
+      "models": {
+        "llama-3.3-70b-versatile": {
+          "latency_history": [
+            0.2
+          ],
+          "status": "ok",
+          "success_history": [
+            1
+          ]
+        },
+        "m1": {
+          "consecutive_failures": 0,
+          "cooldown_until": 0,
+          "failure_category": null,
+          "failure_class": null,
+          "latency_history": [
+            0.0
+          ],
+          "reason": null,
+          "status": "ok",
+          "success_history": [
+            1
+          ]
+        }
+      },
+      "rate_limit_history": [
+        0,
+        0
+      ],
+      "reason": null,
+      "status": "ok",
+      "success_history": [
+        1,
+        1
+      ],
+      "token_bucket": {
+        "capacity": 30.0,
+        "last_refill": 1785023082.1553116,
+        "rpm": 30.0,
+        "tokens": 29.0
+      }
+    },
+    "hf-bridge": {
+      "consecutive_slow_calls": 0,
+      "latency_history": [
+        0.0
+      ],
+      "models": {
+        "local-model": {
+          "consecutive_failures": 0,
+          "cooldown_until": 0,
+          "failure_category": null,
+          "failure_class": null,
+          "latency_history": [
+            0.0
+          ],
+          "reason": null,
+          "status": "ok",
+          "success_history": [
+            1
+          ]
+        }
+      },
+      "rate_limit_history": [
+        0
+      ],
+      "status": "ok",
+      "success_history": [
+        1
+      ]
+    }
+  },
+  "version": 1
+}
