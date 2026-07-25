@@ -1690,8 +1690,45 @@ class TestSmartRouterMissingLibraries(unittest.TestCase):
         self.assertIn("routing_profiles", status)
         self.assertIn("fast", status["routing_profiles"])
 
+    def test_speculative_prewarm_routes(self):
+        mock_route = smart_router.Route("hf-bridge", "local-model", "local", None, MagicMock(return_value="OK"))
+        with patch.object(smart_router, "_library_available", return_value=True), \
+             patch.object(smart_router, "_env_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "is_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "record_metric") as mock_record:
+            smart_router._speculative_prewarm_routes([mock_route])
+            import time
+            time.sleep(0.1)
+            mock_route.ask.assert_called_with(smart_router.HEARTBEAT_PROMPT, mock_route)
+            mock_record.assert_called()
+
+    def test_prewarm_high_priority_bridges_mcp_tool(self):
+        mock_route = smart_router.Route("hf-bridge", "local-model", "local", None, MagicMock(return_value="OK"))
+        with patch.object(smart_router, "_routes_for", return_value=[mock_route]), \
+             patch.object(smart_router, "_library_available", return_value=True), \
+             patch.object(smart_router, "_env_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "is_available", return_value=True):
+            res = smart_router.prewarm_high_priority_bridges("coding")
+            self.assertEqual(res["task_type"], "coding")
+            self.assertEqual(len(res["warmed_routes"]), 1)
+            self.assertEqual(res["warmed_routes"][0]["provider"], "hf-bridge")
+            self.assertEqual(res["warmed_routes"][0]["status"], "warmed")
+
+    def test_ask_smart_triggers_speculative_prewarm_on_high_priority_task(self):
+        route1 = smart_router.Route("groq-bridge", "m1", "free-cloud", None, MagicMock(return_value="primary_res"))
+        route2 = smart_router.Route("hf-bridge", "m2", "local", None, MagicMock(return_value="OK"))
+        with patch.object(smart_router, "_routes_for", return_value=[route1, route2]), \
+             patch.object(smart_router, "_library_available", return_value=True), \
+             patch.object(smart_router, "_env_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "is_available", return_value=True), \
+             patch.object(smart_router, "_speculative_prewarm_routes") as mock_prewarm:
+            res = smart_router.ask_smart("refactor this function", "coding")
+            self.assertEqual(res, "primary_res")
+            mock_prewarm.assert_called_once_with([route2])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
