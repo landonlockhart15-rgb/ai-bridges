@@ -41,6 +41,7 @@ class Route:
     ask: Callable[..., str]
     capabilities: tuple[str, ...] = ()
     capability_scores: Mapping[str, float] | None = None
+    max_context_tokens: int = 32768
 
 
 # Capability tags per route, used to filter candidates for capability-aware
@@ -151,7 +152,6 @@ def _get_routing_weights(task_type: str) -> dict:
 
 DEFAULT_CAPABILITY_SCORE = 0.55
 
-
 def _openai_client(api_key_env: str, base_url: str | None = None, default_headers: dict | None = None):
     if OpenAI is None:
         raise RuntimeError("openai package is not installed")
@@ -199,6 +199,22 @@ def _merge_continuation(partial: str, continuation: str) -> str:
         if partial[-size:] == continuation[:size]:
             return partial + continuation[size:]
     return partial + continuation
+
+
+def _estimate_tokens(text: str) -> int:
+    """Return a fast, provider-neutral estimate for context budgeting."""
+    return max(1, (len(text or "") + 3) // 4) if text else 0
+
+
+def get_route_max_context_tokens(route: Route) -> int:
+    env_name = "SMART_ROUTER_MAX_CONTEXT_" + route.provider.upper().replace("-", "_")
+    configured = os.environ.get(env_name)
+    if configured:
+        try:
+            return max(1, int(configured))
+        except ValueError:
+            pass
+    return max(1, route.max_context_tokens)
 
 
 def _ask_openai_compatible(prompt: str, route: Route, base_url: str | None = None, api_key_env: str = "OPENAI_API_KEY",
@@ -431,23 +447,23 @@ def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
     free_routes = [
         Route("groq-bridge", simple_model, "free-cloud", "GROQ_API_KEY", _ask_groq,
               ("coding", "general", "simple_extraction"),
-              {"general": 0.72, "coding": 0.70, "simple_extraction": 0.84}),
+              {"general": 0.72, "coding": 0.70, "simple_extraction": 0.84}, 32768),
         Route("gemini-bridge", "gemini-2.5-flash", "free-cloud", "GEMINI_API_KEY", _ask_gemini,
               ("coding", "creative_writing", "general"),
-              {"general": 0.72, "coding": 0.76, "creative_writing": 0.86}),
+              {"general": 0.72, "coding": 0.76, "creative_writing": 0.86}, 1048576),
         Route("cerebras-bridge", "gpt-oss-120b", "free-cloud", "CEREBRAS_API_KEY", _ask_cerebras,
               ("coding", "general"),
-              {"general": 0.72, "coding": 0.82}),
+              {"general": 0.72, "coding": 0.82}, 131072),
         Route("openrouter-bridge", "nvidia/nemotron-3-super-120b-a12b:free", "free-cloud", "OPENROUTER_API_KEY", _ask_openrouter,
               ("general", "simple_extraction"),
-              {"general": 0.70, "simple_extraction": 0.78}),
+              {"general": 0.70, "simple_extraction": 0.78}, 131072),
         Route("hf-bridge", local_model, "local", None, _ask_hf,
               ("general", "simple_extraction"),
-              {"general": 0.58, "simple_extraction": 0.68}),
+              {"general": 0.58, "simple_extraction": 0.68}, 32768),
     ]
     paid_routes = [Route("gpt-bridge", paid_model, "paid", "OPENAI_API_KEY", _ask_gpt,
                           ("coding", "creative_writing", "general", "simple_extraction"),
-                          {"general": 0.86, "coding": 0.90, "creative_writing": 0.88, "simple_extraction": 0.86})]
+                          {"general": 0.86, "coding": 0.90, "creative_writing": 0.88, "simple_extraction": 0.86}, 128000)]
 
     paid_requested = normalized in ("paid", "openai", "gpt")
     allow_paid_fallback = os.environ.get("SMART_ROUTER_ALLOW_PAID_FALLBACK", "").lower() in ("1", "true", "yes", "on")
@@ -698,6 +714,7 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
     errors = []
     best_partial = None
     request = prompt
+    original_prompt = prompt
     routes, preflight_errors = _preflight_routes(_routes_for(task_type, prompt))
     errors.extend(preflight_errors)
 
@@ -717,6 +734,12 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
         if not bridge_state.is_available(route.provider, route.model):
             errors.append(f"{route.provider}/{route.model}: cooling down")
             continue
+        if best_partial:
+            continuation = _continuation_prompt(best_partial)
+            if (_estimate_tokens(original_prompt) + _estimate_tokens(continuation)
+                    > get_route_max_context_tokens(route)):
+                errors.append(f"{route.provider}/{route.model}: continuation exceeds context limit")
+                continue
 
         consumed, wait_sec = bridge_state.consume_provider_token(route.provider)
         if not consumed:
