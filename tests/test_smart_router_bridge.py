@@ -1701,6 +1701,25 @@ class TestSmartRouterMissingLibraries(unittest.TestCase):
         self.assertEqual(reliable_weights["capability"], 0.50)
         self.assertEqual(balanced_weights["latency"], 0.25)
 
+    def test_qos_profile_classifies_throttled_before_degraded(self):
+        self.assertEqual(smart_router.bridge_state.qos_profile({}), "Optimal")
+        self.assertEqual(
+            smart_router.bridge_state.qos_profile({"provider_is_degraded": True}),
+            "Degraded",
+        )
+        self.assertEqual(
+            smart_router.bridge_state.qos_profile({
+                "provider_is_degraded": True,
+                "token_bucket_available": False,
+            }),
+            "Throttled",
+        )
+
+    def test_smart_router_status_includes_qos_profile(self):
+        import json
+        status = json.loads(smart_router.mcp.resources["get_smart_router_status"]())
+        self.assertIn(status["routes"][0]["qos_profile"], {"Optimal", "Degraded", "Throttled"})
+
     def test_get_smart_router_status_includes_heatmap_and_profiles(self):
         import json
         status_raw = smart_router.mcp.resources["get_smart_router_status"]()

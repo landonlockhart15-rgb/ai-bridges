@@ -422,6 +422,11 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
         is_throttled = 0 if health.get("token_bucket_available", True) else 1
         # 3. Provider degradation status (healthy first, i.e. 0 for healthy, 1 for degraded)
         is_degraded = 1 if health.get("provider_is_degraded", False) else 0
+        # QoS is a canonical provider profile; use it as a tie-breaker inside
+        # the existing cost tier so the free/local/paid policy remains intact.
+        qos_rank = bridge_state.qos_priority(
+            health.get("qos_profile") or bridge_state.qos_profile(health)
+        )
         # 4. Health: consecutive failures count (lower failures first)
         failures = health["consecutive_failures"]
         # 5. Health: success rate (higher rate first -> negative rate)
@@ -431,7 +436,7 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
         # 7. Latency (lower latency first)
         latency = health["avg_latency"]
 
-        return (is_avail_val, soft_cap_prio, cost_prio, is_throttled, is_degraded, failures, neg_success_rate, neg_score, latency)
+        return (is_avail_val, soft_cap_prio, cost_prio, qos_rank, is_throttled, is_degraded, failures, neg_success_rate, neg_score, latency)
 
     return sorted(routes, key=sort_key)
 
@@ -861,6 +866,7 @@ def get_smart_router_status() -> str:
             "success_rate": health["success_rate"],
             "avg_latency": health["avg_latency"],
             "provider_is_degraded": health.get("provider_is_degraded", False),
+            "qos_profile": health.get("qos_profile", bridge_state.qos_profile(health)),
             "consecutive_slow_calls": health.get("consecutive_slow_calls", 0),
             "is_soft_capped": health.get("is_soft_capped", False),
             "token_bucket_available": health.get("token_bucket_available", True),

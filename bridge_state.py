@@ -58,11 +58,33 @@ DEFAULT_PROVIDER_RPM = {
     "gpt-bridge": 600.0,
 }
 DEFAULT_FALLBACK_RPM = 60.0
+QOS_PROFILES = ("Optimal", "Degraded", "Throttled")
 
 
 
 class ProviderUnavailableError(RuntimeError):
     pass
+
+
+def qos_profile(health):
+    """Return the bridge QoS profile used by smart routing.
+
+    Throttling is the most actionable condition, so it takes precedence over
+    ordinary degradation while the bridge remains available.
+    """
+    if not health.get("token_bucket_available", True):
+        return "Throttled"
+    if health.get("provider_is_degraded", False):
+        return "Degraded"
+    return "Optimal"
+
+
+def qos_priority(profile):
+    """Return a sort rank for a canonical QoS profile."""
+    try:
+        return QOS_PROFILES.index(profile)
+    except ValueError:
+        return len(QOS_PROFILES)
 
 
 class SimpleFileLock:
@@ -733,6 +755,7 @@ def get_route_health(provider, model):
       - provider_is_degraded (bool)
       - consecutive_slow_calls (int)
       - is_soft_capped (bool)
+      - qos_profile ("Optimal" | "Degraded" | "Throttled")
     """
     state = load_state()
     provider_state = state.get("providers", {}).get(provider, {})
@@ -792,7 +815,7 @@ def get_route_health(provider, model):
     bucket = get_token_bucket(provider, state=state)
     tb_status = bucket.get_status()
 
-    return {
+    health = {
         "is_available": is_avail,
         "consecutive_failures": consecutive_failures,
         "success_rate": success_rate,
@@ -806,6 +829,8 @@ def get_route_health(provider, model):
         "token_bucket_tokens": tb_status["tokens"],
         "token_bucket_wait_seconds": tb_status["wait_seconds"],
     }
+    health["qos_profile"] = qos_profile(health)
+    return health
 
 
 
