@@ -1764,9 +1764,193 @@ class TestSmartRouterMissingLibraries(unittest.TestCase):
             self.assertEqual(res, "primary_res")
             mock_prewarm.assert_called_once_with([route2])
 
+    def test_task_profile_aliases_hyphenated_variants_and_custom_capability_scores(self):
+        # Verify hyphenated aliases map identically to underscore variants
+        for hyphenated, underscore in [
+            ("unit-test", "unit_test"),
+            ("code-review", "code_review"),
+            ("bug-fix", "bug_fix"),
+            ("high-reliability", "high_reliability"),
+        ]:
+            self.assertEqual(
+                smart_router.TASK_PROFILE_ALIASES.get(hyphenated),
+                smart_router.TASK_PROFILE_ALIASES.get(underscore)
+            )
+            self.assertEqual(
+                smart_router._get_cost_priority("local", hyphenated),
+                smart_router._get_cost_priority("local", underscore)
+            )
+
+        # Verify route with custom raw capability score takes precedence over generic alias score
+        custom_route = smart_router.Route(
+            "custom-bridge", "custom-model", "free-cloud", None, MagicMock(),
+            capabilities=("unit-test",),
+            capability_scores={"unit-test": 0.95, "coding": 0.70}
+        )
+        fit_raw = smart_router._route_capability_fit(custom_route, "unit-test")
+        self.assertEqual(fit_raw, 0.95)
+
+        # Verify route with raw capability tag without alias score still matches
+        tag_route = smart_router.Route(
+            "tag-bridge", "tag-model", "free-cloud", None, MagicMock(),
+            capabilities=("unit-test",)
+        )
+        fit_tag = smart_router._route_capability_fit(tag_route, "unit-test")
+        self.assertEqual(fit_tag, 0.75)
+
+
+class TestTaskProfileAliasesAdversarial(unittest.TestCase):
+    """Adversarial tests probing edge cases, boundaries, and routing behavior of TASK_PROFILE_ALIASES."""
+
+    def test_task_profile_aliases_mapping_completeness(self):
+        """Pin intended alias mappings to canonical capability tags or routing profile weights."""
+        canonical_tags = {"coding", "simple_extraction", "creative_writing", "fast", "reliable"}
+        for alias, canonical in smart_router.TASK_PROFILE_ALIASES.items():
+            self.assertIn(canonical, canonical_tags, f"Alias '{alias}' maps to unexpected target '{canonical}'")
+            self.assertTrue(len(alias.strip()) > 0)
+
+        # Every entry in HIGH_PRIORITY_TASK_TYPES must be valid and non-empty
+        for task_type in smart_router.HIGH_PRIORITY_TASK_TYPES:
+            self.assertTrue(len(task_type) > 0)
+            alias = smart_router.TASK_PROFILE_ALIASES.get(task_type, task_type)
+            self.assertIn(alias, {"coding", "reliable"})
+
+    def test_edge_case_and_whitespace_task_type_inputs(self):
+        """Probe empty, missing, whitespace, mixed-case, and malformed task_type inputs."""
+        edge_inputs = [None, "", "   ", "\t\n", "  Refactor  ", "BUG_FIX", "  Paid  ", "  Local  ", "FAST"]
+
+        for task_type in edge_inputs:
+            # 1. Routing weights should not throw
+            weights = smart_router._get_routing_weights(task_type)
+            self.assertIn("cost", weights)
+            self.assertIn("latency", weights)
+            self.assertIn("capability", weights)
+
+            # 2. Cost priority should return valid integer
+            prio = smart_router._get_cost_priority("free-cloud", task_type)
+            self.assertIsInstance(prio, int)
+
+            # 3. Capability fit on a dummy route should return float in [0.0, 1.0]
+            dummy_route = smart_router.Route("groq-bridge", "m1", "free-cloud", None, MagicMock(), ("coding",))
+            fit = smart_router._route_capability_fit(dummy_route, task_type)
+            self.assertGreaterEqual(fit, 0.0)
+            self.assertLessEqual(fit, 1.0)
+
+            # 4. _routes_for should complete and return non-empty route list
+            routes = smart_router._routes_for(task_type, "test prompt")
+            self.assertGreater(len(routes), 0)
+
+    def test_cost_priority_specialization_vs_capability_alias(self):
+        """Verify that task types like unit_test use specialized cost priority while aliasing capability to coding."""
+        # unit_test capability aliases to coding, but cost priority prefers local first
+        unit_test_local = smart_router._get_cost_priority("local", "unit_test")
+        unit_test_free = smart_router._get_cost_priority("free-cloud", "unit_test")
+        unit_test_paid = smart_router._get_cost_priority("paid", "unit_test")
+        self.assertEqual((unit_test_local, unit_test_free, unit_test_paid), (0, 1, 2))
+
+        # generic coding task has no cost priority override, defaulting free-cloud first for medium complexity
+        coding_free = smart_router._get_cost_priority("free-cloud", "coding")
+        coding_local = smart_router._get_cost_priority("local", "coding")
+        coding_paid = smart_router._get_cost_priority("paid", "coding")
+        self.assertEqual((coding_free, coding_local, coding_paid), (0, 1, 2))
+
+        # Verify route ordering reflects local priority for unit-test vs free-cloud priority for generic coding
+        local_route = smart_router.Route("local-b", "m1", "local", None, MagicMock(), capabilities=("coding",))
+        free_route = smart_router.Route("free-b", "m2", "free-cloud", None, MagicMock(), capabilities=("coding",))
+
+        with patch.object(smart_router, "_routes_for") as mock_rf, \
+             patch.object(smart_router, "_library_available", return_value=True), \
+             patch.object(smart_router, "_env_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "is_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "get_route_health", return_value={
+                 "is_available": True, "avg_latency": 0.5, "consecutive_failures": 0,
+                 "success_rate": 1.0, "is_soft_capped": False, "token_bucket_available": True
+             }):
+
+            sorted_unit_test = smart_router._sort_routes_by_cost_and_health([free_route, local_route], "unit-test")
+            self.assertEqual(sorted_unit_test[0].cost_tier, "local")
+
+            sorted_coding = smart_router._sort_routes_by_cost_and_health([free_route, local_route], "coding")
+            self.assertEqual(sorted_coding[0].cost_tier, "free-cloud")
+
+    def test_raw_score_overrides_alias_score_and_clamping(self):
+        """Verify raw capability score takes precedence over alias score, and scores are clamped to [0,1]."""
+        route_custom = smart_router.Route(
+            "custom", "m", "free-cloud", None, MagicMock(),
+            capabilities=("coding", "bug-fix"),
+            capability_scores={"bug-fix": 0.98, "coding": 0.65}
+        )
+        # Specific raw task_type 'bug-fix' gets 0.98
+        self.assertEqual(smart_router._route_capability_fit(route_custom, "bug-fix"), 0.98)
+        # Generic task_type 'coding' gets 0.65
+        self.assertEqual(smart_router._route_capability_fit(route_custom, "coding"), 0.65)
+
+        # Test score clamping for out-of-bound raw capability scores
+        route_clamped = smart_router.Route(
+            "clamped", "m", "free-cloud", None, MagicMock(),
+            capability_scores={"out_of_bounds_high": 1.75, "out_of_bounds_low": -0.50}
+        )
+        self.assertEqual(smart_router._route_capability_fit(route_clamped, "out_of_bounds_high"), 1.0)
+        self.assertEqual(smart_router._route_capability_fit(route_clamped, "out_of_bounds_low"), 0.0)
+
+    def test_malformed_and_unknown_task_profile_types(self):
+        """Verify graceful fallback for completely unknown task profile strings."""
+        unknown_inputs = ["unknown_task_type_xyz", "!!!invalid_chars!!!", "a" * 1000]
+
+        for unknown in unknown_inputs:
+            # Routing weights fall back to balanced
+            weights = smart_router._get_routing_weights(unknown)
+            self.assertEqual(weights, smart_router.ROUTING_PROFILE_WEIGHTS["balanced"])
+
+            # Cost priority falls back to standard medium complexity mapping (free-cloud priority = 0)
+            cost_prio = smart_router._get_cost_priority("free-cloud", unknown, "simple prompt")
+            self.assertEqual(cost_prio, 0)
+
+            # Capability fit falls back to general capability score
+            dummy_route = smart_router.Route("r", "m", "free-cloud", None, MagicMock(), capability_scores={"general": 0.62})
+            fit = smart_router._route_capability_fit(dummy_route, unknown)
+            self.assertEqual(fit, 0.62)
+
+    def test_soft_cap_criticality_with_aliases(self):
+        """Verify soft-cap penalty logic correctly recognizes critical tasks via raw and alias names."""
+        soft_capped_route = smart_router.Route("groq-bridge", "m", "free-cloud", None, MagicMock())
+
+        with patch.object(smart_router.bridge_state, "get_route_health", return_value={
+            "is_available": True, "avg_latency": 0.1, "consecutive_failures": 0,
+            "success_rate": 1.0, "is_soft_capped": True, "token_bucket_available": True
+        }):
+            # Non-critical task ("docs", aliased to "simple_extraction") gets soft-cap penalty (total score halved)
+            score_non_critical = smart_router._route_capability_score(soft_capped_route, "docs", "simple prompt")
+
+            # Critical task ("paid", or complex prompt) bypasses soft-cap penalty
+            score_critical = smart_router._route_capability_score(soft_capped_route, "paid", "simple prompt")
+            score_complex = smart_router._route_capability_score(soft_capped_route, "docs", "refactor and architecture plan " * 30)
+
+            self.assertGreater(score_critical["total"], score_non_critical["total"])
+            self.assertGreater(score_complex["total"], score_non_critical["total"])
+
+    def test_prewarm_high_priority_aliased_tasks(self):
+        """Verify speculative prewarming triggers correctly for aliased high-priority tasks."""
+        route1 = smart_router.Route("groq-bridge", "m1", "free-cloud", None, MagicMock(return_value="res"))
+        route2 = smart_router.Route("hf-bridge", "m2", "local", None, MagicMock(return_value="OK"))
+
+        for high_prio_alias in ["unit-test", "bugfix", "code-review", "high-reliability"]:
+            with patch.object(smart_router, "_routes_for", return_value=[route1, route2]), \
+                 patch.object(smart_router, "_library_available", return_value=True), \
+                 patch.object(smart_router, "_env_available", return_value=True), \
+                 patch.object(smart_router.bridge_state, "is_available", return_value=True):
+
+                res = smart_router.prewarm_high_priority_bridges(high_prio_alias)
+                self.assertEqual(res["task_type"], high_prio_alias)
+                self.assertEqual(len(res["warmed_routes"]), 2)
+                self.assertEqual(res["warmed_routes"][0]["provider"], "groq-bridge")
+                self.assertEqual(res["warmed_routes"][1]["provider"], "hf-bridge")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 
 
 

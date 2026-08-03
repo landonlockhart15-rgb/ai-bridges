@@ -81,11 +81,14 @@ COMPLEX_INTENT_KEYWORDS = (
 TASK_PROFILE_ALIASES = {
     "refactor": "coding",
     "bug_fix": "coding",
+    "bug-fix": "coding",
     "bugfix": "coding",
     "debug": "coding",
     "unit_test": "coding",
+    "unit-test": "coding",
     "test": "coding",
     "code_review": "coding",
+    "code-review": "coding",
     "docs": "simple_extraction",
     "documentation": "simple_extraction",
     "story": "creative_writing",
@@ -94,25 +97,31 @@ TASK_PROFILE_ALIASES = {
     "quick": "fast",
     "reliable": "reliable",
     "high_reliability": "reliable",
+    "high-reliability": "reliable",
 }
 
 HIGH_PRIORITY_TASK_TYPES = {
     "coding",
     "refactor",
     "bug_fix",
+    "bug-fix",
     "bugfix",
     "debug",
     "unit_test",
+    "unit-test",
     "test",
     "code_review",
+    "code-review",
     "reliable",
     "high_reliability",
+    "high-reliability",
 }
 
 # Keep capability filtering canonical, while allowing caller-facing profiles
 # to express a useful cost preference within that capability.
 TASK_PROFILE_COST_PRIORITIES = {
     "unit_test": ("local", "free-cloud", "paid"),
+    "unit-test": ("local", "free-cloud", "paid"),
     "test": ("local", "free-cloud", "paid"),
     "docs": ("local", "free-cloud", "paid"),
     "documentation": ("local", "free-cloud", "paid"),
@@ -120,13 +129,16 @@ TASK_PROFILE_COST_PRIORITIES = {
     "copywriting": ("local", "free-cloud", "paid"),
     "refactor": ("free-cloud", "local", "paid"),
     "bug_fix": ("free-cloud", "local", "paid"),
+    "bug-fix": ("free-cloud", "local", "paid"),
     "bugfix": ("free-cloud", "local", "paid"),
     "debug": ("free-cloud", "local", "paid"),
     "code_review": ("free-cloud", "local", "paid"),
+    "code-review": ("free-cloud", "local", "paid"),
     "fast": ("free-cloud", "local", "paid"),
     "quick": ("free-cloud", "local", "paid"),
     "reliable": ("free-cloud", "local", "paid"),
     "high_reliability": ("free-cloud", "local", "paid"),
+    "high-reliability": ("free-cloud", "local", "paid"),
 }
 
 ROUTING_PROFILE_WEIGHTS = {
@@ -298,18 +310,19 @@ def _task_complexity(prompt: str) -> str:
 
 
 def _get_cost_priority(cost_tier: str, task_type: str, prompt: str | None = None) -> int:
-    normalized = (task_type or "auto").lower().strip()
-    profile_priority = TASK_PROFILE_COST_PRIORITIES.get(normalized)
+    raw = (task_type or "auto").lower().strip()
+    alias = TASK_PROFILE_ALIASES.get(raw, raw)
+    profile_priority = TASK_PROFILE_COST_PRIORITIES.get(raw) or TASK_PROFILE_COST_PRIORITIES.get(alias)
     if profile_priority:
         return profile_priority.index(cost_tier) if cost_tier in profile_priority else 99
-    complexity = _task_complexity(prompt or "") if normalized == "auto" else "medium"
-    if normalized in ("paid", "openai", "gpt"):
+    complexity = _task_complexity(prompt or "") if raw in ("auto", "simple", "fast", "quick") or alias in ("auto", "simple", "fast", "quick") else "medium"
+    if raw in ("paid", "openai", "gpt") or alias in ("paid", "openai", "gpt"):
         mapping = {
             "paid": 0,
             "free-cloud": 1,
             "local": 2
         }
-    elif normalized in ("local", "offline", "private"):
+    elif raw in ("local", "offline", "private") or alias in ("local", "offline", "private"):
         mapping = {
             "local": 0,
             "free-cloud": 1,
@@ -358,13 +371,16 @@ def _score_from_latency(avg_latency: float) -> float:
 
 
 def _route_capability_fit(route: Route, task_type: str) -> float:
-    normalized = TASK_PROFILE_ALIASES.get((task_type or "auto").lower().strip(), (task_type or "auto").lower().strip())
+    raw = (task_type or "auto").lower().strip()
+    alias = TASK_PROFILE_ALIASES.get(raw, raw)
     scores = route.capability_scores or {}
-    if normalized in scores:
-        return max(0.0, min(1.0, float(scores[normalized])))
-    if normalized in route.capabilities:
+    if raw in scores:
+        return max(0.0, min(1.0, float(scores[raw])))
+    if alias in scores:
+        return max(0.0, min(1.0, float(scores[alias])))
+    if raw in route.capabilities or alias in route.capabilities:
         return 0.75
-    if normalized in ("auto", "simple", "fast", "quick", "paid", "openai", "gpt", "local", "offline", "private"):
+    if raw in ("auto", "simple", "fast", "quick", "paid", "openai", "gpt", "local", "offline", "private") or alias in ("auto", "simple", "fast", "quick", "paid", "openai", "gpt", "local", "offline", "private"):
         return max(0.0, min(1.0, float(scores.get("general", DEFAULT_CAPABILITY_SCORE))))
     return max(0.0, min(1.0, float(scores.get("general", DEFAULT_CAPABILITY_SCORE))))
 
@@ -387,8 +403,9 @@ def _route_capability_score(route: Route, task_type: str, prompt: str | None = N
         total *= 0.75
 
     # Penalize soft-capped providers for non-critical tasks
-    normalized = TASK_PROFILE_ALIASES.get((task_type or "auto").lower().strip(), (task_type or "auto").lower().strip())
-    is_critical = normalized in ("paid", "openai", "gpt") or _task_complexity(prompt or "") == "complex"
+    raw = (task_type or "auto").lower().strip()
+    alias = TASK_PROFILE_ALIASES.get(raw, raw)
+    is_critical = raw in ("paid", "openai", "gpt") or alias in ("paid", "openai", "gpt") or _task_complexity(prompt or "") == "complex"
     if health.get("is_soft_capped", False) and not is_critical:
         total *= 0.50
 
@@ -412,8 +429,9 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
         is_avail_val = 0 if health["is_available"] else 1
 
         # Soft-cap penalty: if provider is soft-capped and this is a non-critical task, penalize it by pushing it after non-soft-capped ones.
-        normalized = TASK_PROFILE_ALIASES.get((task_type or "auto").lower().strip(), (task_type or "auto").lower().strip())
-        is_critical = normalized in ("paid", "openai", "gpt") or _task_complexity(prompt or "") == "complex"
+        raw = (task_type or "auto").lower().strip()
+        alias = TASK_PROFILE_ALIASES.get(raw, raw)
+        is_critical = raw in ("paid", "openai", "gpt") or alias in ("paid", "openai", "gpt") or _task_complexity(prompt or "") == "complex"
         soft_cap_prio = 1 if (health.get("is_soft_capped", False) and not is_critical) else 0
 
         # 2. Cost tier priority (lower value first)
@@ -445,7 +463,7 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
 def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
     requested = (task_type or "auto").lower().strip()
     normalized = TASK_PROFILE_ALIASES.get(requested, requested)
-    simple_model = "llama-3.1-8b-instant" if normalized in ("simple", "fast", "quick") else "llama-3.3-70b-versatile"
+    simple_model = "llama-3.1-8b-instant" if normalized in ("simple", "fast", "quick") or requested in ("simple", "fast", "quick") else "llama-3.3-70b-versatile"
     local_model = os.environ.get("SMART_ROUTER_LOCAL_MODEL", "gemma4:latest")
     paid_model = os.environ.get("SMART_ROUTER_PAID_MODEL", "gpt-4o-mini")
 
@@ -470,12 +488,12 @@ def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
                           ("coding", "creative_writing", "general", "simple_extraction"),
                           {"general": 0.86, "coding": 0.90, "creative_writing": 0.88, "simple_extraction": 0.86}, 128000)]
 
-    paid_requested = normalized in ("paid", "openai", "gpt")
+    paid_requested = normalized in ("paid", "openai", "gpt") or requested in ("paid", "openai", "gpt")
     allow_paid_fallback = os.environ.get("SMART_ROUTER_ALLOW_PAID_FALLBACK", "").lower() in ("1", "true", "yes", "on")
 
     if paid_requested:
         routes = paid_routes + free_routes
-    elif normalized in ("local", "offline", "private"):
+    elif normalized in ("local", "offline", "private") or requested in ("local", "offline", "private"):
         routes = [free_routes[-1]] + free_routes[:-1]
         if allow_paid_fallback:
             routes += paid_routes
@@ -484,8 +502,8 @@ def _routes_for(task_type: str, prompt: str | None = None) -> List[Route]:
         if allow_paid_fallback:
             routes += paid_routes
 
-    if normalized in CAPABILITY_TASK_TYPES:
-        capable_routes = [r for r in routes if normalized in r.capabilities]
+    if normalized in CAPABILITY_TASK_TYPES or requested in CAPABILITY_TASK_TYPES:
+        capable_routes = [r for r in routes if normalized in r.capabilities or requested in r.capabilities]
         # Only restrict to capable_routes if at least one capable free/local route is fully available.
         # Otherwise, keep non-capable free/local routes in the list as fallback before using paid GPT.
         has_available_capable_free = any(
