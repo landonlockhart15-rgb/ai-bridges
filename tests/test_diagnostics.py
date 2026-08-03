@@ -204,5 +204,70 @@ class TestDiagnostics(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_write_status_cache_unserializable_preserves_file(self):
+        import bridge_state
+        test_file = bridge_state.STATUS_CACHE_FILE
+        original_content = json.dumps({"valid": "data"})
+        with open(test_file, "w", encoding="utf-8") as f:
+            f.write(original_content)
+
+        try:
+            unserializable = {"bad": object()}
+            bridge_state.write_status_cache(unserializable)
+
+            with open(test_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertEqual(content, original_content)
+        finally:
+            if os.path.exists(test_file):
+                try:
+                    os.remove(test_file)
+                except OSError:
+                    pass
+
+    def test_save_state_unserializable_preserves_file(self):
+        import bridge_state
+        test_file = bridge_state.STATE_FILE_PATH
+        original_content = json.dumps({"version": 1, "providers": {}})
+        with open(test_file, "w", encoding="utf-8") as f:
+            f.write(original_content)
+
+        try:
+            unserializable = {"bad": object()}
+            bridge_state.save_state(unserializable)
+
+            with open(test_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertEqual(content, original_content)
+        finally:
+            if os.path.exists(test_file):
+                try:
+                    os.remove(test_file)
+                except OSError:
+                    pass
+
+    def test_save_usage_db_unserializable_preserves_file(self):
+        import usage_tracker
+        test_file = usage_tracker.USAGE_FILE_PATH
+        original_content = json.dumps({"logs": []})
+        with open(test_file, "w", encoding="utf-8") as f:
+            f.write(original_content)
+
+        try:
+            unserializable = {"bad": object()}
+            usage_tracker.save_usage_db(unserializable)
+
+            with open(test_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertEqual(content, original_content)
+        finally:
+            if os.path.exists(test_file):
+                try:
+                    os.remove(test_file)
+                except OSError:
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main()
+
