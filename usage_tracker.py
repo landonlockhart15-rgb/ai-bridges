@@ -162,18 +162,26 @@ def load_usage_db():
 def save_usage_db(db):
     """Save the usage database atomically using a temp file."""
     try:
-        temp_path = USAGE_FILE_PATH + ".tmp"
+        payload = json.dumps(db, indent=2)
+    except Exception:
+        return
+    temp_path = USAGE_FILE_PATH + ".tmp"
+    try:
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(db, f, indent=2)
-        if os.path.exists(USAGE_FILE_PATH):
-            os.remove(USAGE_FILE_PATH)
-        os.rename(temp_path, USAGE_FILE_PATH)
+            f.write(payload)
+        os.replace(temp_path, USAGE_FILE_PATH)
     except Exception:
         try:
             with open(USAGE_FILE_PATH, "w", encoding="utf-8") as f:
-                json.dump(db, f, indent=2)
+                f.write(payload)
         except Exception:
             pass
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 def get_budget_caps():
     """Retrieve daily and monthly budget caps from environment or config file."""

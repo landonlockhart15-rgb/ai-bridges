@@ -418,34 +418,50 @@ def load_status_cache():
 
 def write_status_cache(cache_data):
     try:
-        temp_path = STATUS_CACHE_FILE + ".tmp"
+        payload = json.dumps(cache_data, indent=2, sort_keys=True)
+    except Exception:
+        return
+    temp_path = STATUS_CACHE_FILE + ".tmp"
+    try:
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(cache_data, f, indent=2, sort_keys=True)
-        if os.path.exists(STATUS_CACHE_FILE):
-            os.remove(STATUS_CACHE_FILE)
-        os.rename(temp_path, STATUS_CACHE_FILE)
+            f.write(payload)
+        os.replace(temp_path, STATUS_CACHE_FILE)
     except Exception:
         try:
             with open(STATUS_CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump(cache_data, f, indent=2, sort_keys=True)
+                f.write(payload)
         except Exception:
             pass
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def save_state(state):
     try:
-        temp_path = STATE_FILE_PATH + ".tmp"
+        payload = json.dumps(state, indent=2, sort_keys=True)
+    except Exception:
+        return
+    temp_path = STATE_FILE_PATH + ".tmp"
+    try:
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, sort_keys=True)
-        if os.path.exists(STATE_FILE_PATH):
-            os.remove(STATE_FILE_PATH)
-        os.rename(temp_path, STATE_FILE_PATH)
+            f.write(payload)
+        os.replace(temp_path, STATE_FILE_PATH)
     except Exception:
         try:
             with open(STATE_FILE_PATH, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, sort_keys=True)
+                f.write(payload)
         except Exception:
             pass
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def _entry_is_available(entry, now=None):
