@@ -213,9 +213,157 @@ def _merge_continuation(partial: str, continuation: str) -> str:
     return partial + continuation
 
 
-def _estimate_tokens(text: str) -> int:
+def _estimate_tokens(val: str | list | dict | None) -> int:
     """Return a fast, provider-neutral estimate for context budgeting."""
-    return max(1, (len(text or "") + 3) // 4) if text else 0
+    if not val:
+        return 0
+    if isinstance(val, str):
+        return max(1, (len(val) + 3) // 4)
+    if isinstance(val, dict):
+        role = str(val.get("role", "") or "")
+        c_val = val.get("content")
+        content = str(c_val) if c_val is not None else ""
+        return _estimate_tokens(role) + _estimate_tokens(content) + 4
+    if isinstance(val, list):
+        return sum(_estimate_tokens(item) for item in val)
+    return max(1, (len(str(val)) + 3) // 4)
+
+
+def _negotiate_prompt_string(prompt: str, capacity: int) -> str:
+    if capacity <= 0:
+        return ""
+    current_tokens = _estimate_tokens(prompt)
+    if current_tokens <= capacity:
+        return prompt
+
+    max_chars = capacity * 4
+    if max_chars <= 0:
+        return ""
+    prune_notice = "\n[... Preceding context dynamically pruned to fit bridge context limit ...]\n"
+    notice_chars = len(prune_notice)
+    available_chars = max_chars - notice_chars
+    if available_chars < 40:
+        return prompt[-max_chars:] if max_chars > 0 else ""
+
+    head_chars = max(20, available_chars // 4)
+    tail_chars = available_chars - head_chars
+
+    head = prompt[:head_chars]
+    tail = prompt[-tail_chars:]
+    return f"{head}{prune_notice}{tail}"
+
+
+def _negotiate_messages(messages: list[dict], capacity: int) -> list[dict]:
+    if capacity <= 0:
+        return []
+    current_tokens = _estimate_tokens(messages)
+    if current_tokens <= capacity:
+        return list(messages)
+
+    if not messages:
+        return []
+
+    system_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"]
+    other_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
+
+    sys_tokens = _estimate_tokens(system_msgs)
+
+    if sys_tokens >= capacity:
+        pruned_sys = []
+        avail_sys = capacity
+        for sm in system_msgs:
+            sm_c = sm.get("content")
+            sm_str = str(sm_c) if sm_c is not None else ""
+            c = _negotiate_prompt_string(sm_str, max(10, avail_sys - 8))
+            pruned_sys.append({"role": "system", "content": c})
+            avail_sys -= _estimate_tokens(pruned_sys[-1])
+            if avail_sys <= 0:
+                break
+        return pruned_sys
+
+    rem_capacity = capacity - sys_tokens
+    if not other_msgs:
+        return system_msgs
+
+    last_msg = other_msgs[-1]
+    last_tokens = _estimate_tokens(last_msg)
+    middle_msgs = other_msgs[:-1]
+
+    dummy_notice = {
+        "role": "system",
+        "content": f"[Context Negotiation: {len(middle_msgs)} earlier turns pruned to fit target bridge context limit]"
+    }
+    notice_overhead = _estimate_tokens(dummy_notice)
+
+    selected_middle = []
+    current_middle_tokens = 0
+    if _estimate_tokens(middle_msgs) + last_tokens <= rem_capacity:
+        selected_middle = list(middle_msgs)
+        current_middle_tokens = _estimate_tokens(selected_middle)
+    else:
+        avail_for_middle = rem_capacity - notice_overhead
+        for msg in reversed(middle_msgs):
+            msg_tokens = _estimate_tokens(msg)
+            if current_middle_tokens + msg_tokens + last_tokens <= avail_for_middle:
+                selected_middle.insert(0, msg)
+                current_middle_tokens += msg_tokens
+            else:
+                break
+
+    pruned_count = len(middle_msgs) - len(selected_middle)
+    result = list(system_msgs)
+    notice_tokens = 0
+    if pruned_count > 0:
+        notice_msg = {
+            "role": "system",
+            "content": f"[Context Negotiation: {pruned_count} earlier turns pruned to fit target bridge context limit]"
+        }
+        result.append(notice_msg)
+        notice_tokens = _estimate_tokens(notice_msg)
+
+    result.extend(selected_middle)
+
+    used_so_far = sys_tokens + notice_tokens + current_middle_tokens
+    if used_so_far + last_tokens > capacity:
+        avail_for_last = max(10, capacity - used_so_far - 8)
+        last_c = last_msg.get("content")
+        last_str = str(last_c) if last_c is not None else ""
+        last_content = _negotiate_prompt_string(last_str, avail_for_last)
+        new_last = dict(last_msg)
+        new_last["content"] = last_content
+        result.append(new_last)
+    else:
+        result.append(last_msg)
+
+    return result
+
+
+def negotiate_context_window(
+    prompt_or_messages: str | list | dict,
+    target_max_tokens: int,
+    reserve_tokens: int = 1024,
+) -> str | list | dict:
+    """Dynamically prune or summarize conversation context to fit target bridge context window.
+
+    Ensures prompt or structured message history stays within target_max_tokens - reserve_tokens.
+    Preserves system instructions and the latest turns while summarizing/pruning older context.
+    """
+    reserve_limit = max(16, int(target_max_tokens * 0.25))
+    effective_reserve = min(reserve_tokens, reserve_limit)
+    capacity = max(16, target_max_tokens - effective_reserve)
+    if _estimate_tokens(prompt_or_messages) <= capacity:
+        return prompt_or_messages
+
+    if isinstance(prompt_or_messages, list):
+        return _negotiate_messages(prompt_or_messages, capacity)
+    if isinstance(prompt_or_messages, str):
+        return _negotiate_prompt_string(prompt_or_messages, capacity)
+    if isinstance(prompt_or_messages, dict):
+        c = _negotiate_prompt_string(prompt_or_messages.get("content", ""), capacity - 4)
+        res = dict(prompt_or_messages)
+        res["content"] = c
+        return res
+    return prompt_or_messages
 
 
 def get_route_max_context_tokens(route: Route) -> int:
@@ -297,8 +445,14 @@ def _ask_gemini(prompt: str, route: Route) -> str:
     return response.text
 
 
-def _task_complexity(prompt: str) -> str:
-    normalized = (prompt or "").lower().strip()
+def _task_complexity(prompt: str | list | dict) -> str:
+    if isinstance(prompt, list):
+        text = " ".join(str(m.get("content", "") or "") for m in prompt if isinstance(m, dict))
+    elif isinstance(prompt, dict):
+        text = str(prompt.get("content", "") or "")
+    else:
+        text = str(prompt or "")
+    normalized = text.lower().strip()
     word_count = len(normalized.split())
     if not normalized:
         return "medium"
@@ -728,6 +882,24 @@ def prewarm_high_priority_bridges(task_type: str = "coding") -> dict:
 
 
 @mcp.tool()
+def negotiate_context(prompt: str, target_max_tokens: int = 32768) -> dict:
+    """
+    Negotiate and prune prompt/context history to fit a target bridge context window.
+    Returns negotiated prompt and token statistics.
+    """
+    initial_tokens = _estimate_tokens(prompt)
+    negotiated = negotiate_context_window(prompt, target_max_tokens)
+    final_tokens = _estimate_tokens(negotiated)
+    return {
+        "initial_tokens": initial_tokens,
+        "final_tokens": final_tokens,
+        "target_max_tokens": target_max_tokens,
+        "was_pruned": final_tokens < initial_tokens,
+        "negotiated_prompt": str(negotiated),
+    }
+
+
+@mcp.tool()
 def ask_smart(prompt: str, task_type: str = "auto") -> str:
     """
     Ask the cheapest suitable provider first, then fall back through free/local routes
@@ -757,12 +929,25 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
         if not bridge_state.is_available(route.provider, route.model):
             errors.append(f"{route.provider}/{route.model}: cooling down")
             continue
+
+        target_max_context = get_route_max_context_tokens(route)
+        route_request = request
         if best_partial:
             continuation = _continuation_prompt(best_partial)
-            if (_estimate_tokens(original_prompt) + _estimate_tokens(continuation)
-                    > get_route_max_context_tokens(route)):
-                errors.append(f"{route.provider}/{route.model}: continuation exceeds context limit")
-                continue
+            est_total = _estimate_tokens(original_prompt) + _estimate_tokens(continuation)
+            if est_total > target_max_context:
+                avail_for_orig = max(64, target_max_context - _estimate_tokens(continuation) - 256)
+                negotiated_orig = negotiate_context_window(original_prompt, avail_for_orig, reserve_tokens=0)
+                if _estimate_tokens(negotiated_orig) + _estimate_tokens(continuation) > target_max_context:
+                    errors.append(f"{route.provider}/{route.model}: continuation exceeds context limit")
+                    continue
+            route_request = continuation
+        else:
+            if _estimate_tokens(route_request) > target_max_context:
+                route_request = negotiate_context_window(route_request, target_max_context, reserve_tokens=256)
+                if _estimate_tokens(route_request) > target_max_context:
+                    errors.append(f"{route.provider}/{route.model}: prompt exceeds context limit after negotiation")
+                    continue
 
         consumed, wait_sec = bridge_state.consume_provider_token(route.provider)
         if not consumed:
@@ -775,7 +960,7 @@ def ask_smart(prompt: str, task_type: str = "auto") -> str:
         try:
             usage_tracker.check_budget(route.provider, route.model)
             called = True
-            result = route.ask(request, route)
+            result = route.ask(route_request, route)
             latency = time.time() - start_time
             bridge_state.mark_available(route.provider)
             bridge_state.mark_available(route.provider, route.model)

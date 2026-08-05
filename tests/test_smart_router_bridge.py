@@ -1947,6 +1947,162 @@ class TestTaskProfileAliasesAdversarial(unittest.TestCase):
                 self.assertEqual(res["warmed_routes"][1]["provider"], "hf-bridge")
 
 
+class TestDynamicContextNegotiation(unittest.TestCase):
+    def test_negotiate_context_window_short_prompt_unmodified(self):
+        prompt = "Explain quantum computing briefly."
+        negotiated = smart_router.negotiate_context_window(prompt, target_max_tokens=32768)
+        self.assertEqual(negotiated, prompt)
+
+    def test_negotiate_context_window_long_prompt_pruning(self):
+        long_prompt = "Header instructions:\n" + ("Word " * 2000) + "\nTail question: summary?"
+        target_max_tokens = 500
+        negotiated = smart_router.negotiate_context_window(long_prompt, target_max_tokens=target_max_tokens, reserve_tokens=100)
+        self.assertIn("Header instructions:", negotiated)
+        self.assertIn("Tail question: summary?", negotiated)
+        self.assertIn("Preceding context dynamically pruned", negotiated)
+        self.assertLessEqual(smart_router._estimate_tokens(negotiated), 400)
+
+    def test_negotiate_context_window_messages_pruning(self):
+        messages = [
+            {"role": "system", "content": "You are a helpful coding assistant."},
+            {"role": "user", "content": "Turn 1: " + ("data " * 500)},
+            {"role": "assistant", "content": "Turn 1 response: " + ("answer " * 500)},
+            {"role": "user", "content": "Turn 2: " + ("more data " * 500)},
+            {"role": "assistant", "content": "Turn 2 response: " + ("more answer " * 500)},
+            {"role": "user", "content": "Latest Query: Fix this bug."}
+        ]
+        target_max_tokens = 300
+        negotiated = smart_router.negotiate_context_window(messages, target_max_tokens=target_max_tokens, reserve_tokens=50)
+        self.assertEqual(negotiated[0]["role"], "system")
+        self.assertEqual(negotiated[0]["content"], "You are a helpful coding assistant.")
+        self.assertEqual(negotiated[-1]["role"], "user")
+        self.assertEqual(negotiated[-1]["content"], "Latest Query: Fix this bug.")
+        self.assertTrue(any("Context Negotiation" in m.get("content", "") for m in negotiated if m.get("role") == "system"))
+        self.assertLessEqual(smart_router._estimate_tokens(negotiated), 250)
+
+    def test_negotiate_context_mcp_tool(self):
+        long_prompt = "Instruction: " + ("test " * 1000) + " End."
+        res = smart_router.negotiate_context(long_prompt, target_max_tokens=200)
+        self.assertTrue(res["was_pruned"])
+        self.assertEqual(res["target_max_tokens"], 200)
+        self.assertLess(res["final_tokens"], res["initial_tokens"])
+        self.assertIn("Instruction:", res["negotiated_prompt"])
+
+    @patch.dict("os.environ", {
+        "GROQ_API_KEY": "gsk_test_key",
+        "SMART_ROUTER_MAX_CONTEXT_GROQ_BRIDGE": "100",
+    }, clear=True)
+    def test_ask_smart_dynamic_context_window_negotiation_fallback(self):
+        long_prompt = "System prompt setup.\n" + ("Context detail " * 500) + "\nFinal question: What is the answer?"
+        with patch.object(smart_router, "_routes_for") as mock_routes_for, \
+             patch.object(smart_router, "_library_available", return_value=True), \
+             patch.object(smart_router, "_env_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "is_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "consume_provider_token", return_value=(True, 0.0)):
+            
+            called_requests = []
+            def dummy_ask(prompt_arg, route_arg):
+                called_requests.append(prompt_arg)
+                return "groq-success"
+
+            route = smart_router.Route("groq-bridge", "llama-3.1-8b-instant", "free-cloud", "GROQ_API_KEY", dummy_ask, max_context_tokens=100)
+            mock_routes_for.return_value = [route]
+
+            result = smart_router.ask_smart(long_prompt, "auto")
+            self.assertEqual(result, "groq-success")
+            self.assertEqual(len(called_requests), 1)
+            self.assertIn("Preceding context dynamically pruned", called_requests[0])
+            self.assertLessEqual(smart_router._estimate_tokens(called_requests[0]), 100)
+
+    # --- ADVERSARIAL EDGE CASE TESTS ---
+
+    # --- ADVERSARIAL EDGE CASE TESTS ---
+
+    def test_adversarial_zero_capacity_slicing_bug(self):
+        """Verify string negotiation with zero capacity (capacity=0) returns empty string instead of full unpruned prompt."""
+        long_prompt = "Header\n" + ("SecretData " * 500) + "\nTail"
+        result = smart_router._negotiate_prompt_string(long_prompt, capacity=0)
+        self.assertEqual(result, "", "Zero capacity must return empty string")
+
+    def test_adversarial_messages_pruning_notice_capacity_overflow(self):
+        """Verify message negotiation token capacity stays within target when notice system message is injected."""
+        messages = [
+            {"role": "system", "content": "Sys prompt."},
+            {"role": "user", "content": "Turn 1: " + ("w " * 50)},
+            {"role": "assistant", "content": "Turn 1 ans: " + ("a " * 50)},
+            {"role": "user", "content": "Turn 2: " + ("x " * 50)},
+            {"role": "assistant", "content": "Turn 2 ans: " + ("b " * 50)},
+            {"role": "user", "content": "Latest: " + ("y " * 10)},
+        ]
+        target_capacity = 70
+        negotiated = smart_router._negotiate_messages(messages, capacity=target_capacity)
+        estimated = smart_router._estimate_tokens(negotiated)
+        self.assertLessEqual(estimated, target_capacity, "Injected notice message must not push token count over target capacity")
+
+    def test_adversarial_messages_none_content_handling(self):
+        """Probe message negotiation when a message contains None for content (common in tool call responses)."""
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "call_1"}]},
+            {"role": "user", "content": "Final user query"}
+        ]
+        negotiated = smart_router.negotiate_context_window(messages, target_max_tokens=32768)
+        self.assertEqual(len(negotiated), 3)
+
+    def test_adversarial_ask_smart_continuation_prompt_omission_bug(self):
+        """Verify ask_smart continuation logic transmits continuation prompt on fallback."""
+        r2_calls = []
+        def dummy_ask_1(prompt_arg, route_arg):
+            raise smart_router.TruncatedResponseError(partial_content="Partial answer so far")
+
+        def dummy_ask_2(prompt_arg, route_arg):
+            r2_calls.append(prompt_arg)
+            return " finished"
+
+        route1 = smart_router.Route("r1", "m1", "free-cloud", "GROQ_API_KEY", dummy_ask_1, max_context_tokens=5000)
+        route2 = smart_router.Route("r2", "m2", "free-cloud", "GROQ_API_KEY", dummy_ask_2, max_context_tokens=10000)
+
+        with patch.object(smart_router, "_routes_for", return_value=[route1, route2]), \
+             patch.object(smart_router, "_speculative_prewarm_routes"), \
+             patch.object(smart_router, "_library_available", return_value=True), \
+             patch.object(smart_router, "_env_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "is_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "consume_provider_token", return_value=(True, 0.0)):
+
+            smart_router.ask_smart("Short original prompt", "auto")
+            self.assertEqual(len(r2_calls), 1)
+            self.assertIn("Continue the answer below", r2_calls[0], "Route 2 must receive continuation prompt")
+
+    def test_adversarial_ask_smart_preserves_structured_message_list(self):
+        """Verify ask_smart preserves structured message list type during context window negotiation."""
+        messages = [
+            {"role": "system", "content": "Sys prompt."},
+            {"role": "user", "content": "Prompt " + ("x " * 200)}
+        ]
+        received = []
+        def dummy_ask(prompt_arg, route_arg):
+            received.append(prompt_arg)
+            return "ok"
+
+        route = smart_router.Route("groq-bridge", "llama-3.1-8b-instant", "free-cloud", "GROQ_API_KEY", dummy_ask, max_context_tokens=50)
+        with patch.object(smart_router, "_routes_for", return_value=[route]), \
+             patch.object(smart_router, "_library_available", return_value=True), \
+             patch.object(smart_router, "_env_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "is_available", return_value=True), \
+             patch.object(smart_router.bridge_state, "consume_provider_token", return_value=(True, 0.0)):
+
+            result = smart_router.ask_smart(messages, "auto")
+            self.assertEqual(result, "ok")
+            self.assertIsInstance(received[0], list, "Negotiated message list must remain a list and not be stringified by str()")
+
+    def test_adversarial_empty_and_malformed_inputs(self):
+        """Probe empty, missing, or malformed input types to negotiate_context_window."""
+        self.assertEqual(smart_router.negotiate_context_window("", target_max_tokens=100), "")
+        self.assertEqual(smart_router.negotiate_context_window([], target_max_tokens=100), [])
+        self.assertEqual(smart_router.negotiate_context_window({}, target_max_tokens=100), {})
+        self.assertIsNone(smart_router.negotiate_context_window(None, target_max_tokens=100))
+
+
 if __name__ == "__main__":
     unittest.main()
 
