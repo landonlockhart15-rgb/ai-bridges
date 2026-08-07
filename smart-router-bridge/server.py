@@ -42,6 +42,7 @@ class Route:
     capabilities: tuple[str, ...] = ()
     capability_scores: Mapping[str, float] | None = None
     max_context_tokens: int = 32768
+    cost_weight: float | None = None
 
 
 # Capability tags per route, used to filter candidates for capability-aware
@@ -150,6 +151,21 @@ ROUTING_PROFILE_WEIGHTS = {
 }
 
 CAPABILITY_SCORE_WEIGHTS = ROUTING_PROFILE_WEIGHTS["balanced"]
+
+COST_EFFICIENCY_WEIGHTS = {
+    "reliability": 0.50,
+    "latency": 0.30,
+    "cost_weight": 0.20,
+}
+
+# Normalized route cost. Free cloud has no per-call cost, local inference has a
+# small resource cost, and paid API use carries the full penalty. A route may
+# override this default directly or through SMART_ROUTER_COST_WEIGHT_<PROVIDER>.
+DEFAULT_ROUTE_COST_WEIGHTS = {
+    "free-cloud": 0.0,
+    "local": 0.10,
+    "paid": 1.0,
+}
 
 
 def _get_routing_weights(task_type: str) -> dict:
@@ -370,6 +386,37 @@ def _score_from_latency(avg_latency: float) -> float:
     return max(0.0, min(1.0, 1.0 - (avg_latency / slow_edge)))
 
 
+def _route_cost_weight(route: Route) -> float:
+    env_name = "SMART_ROUTER_COST_WEIGHT_" + route.provider.upper().replace("-", "_")
+    configured = os.environ.get(env_name)
+    try:
+        weight = float(configured) if configured is not None else route.cost_weight
+    except ValueError:
+        weight = route.cost_weight
+    if weight is None:
+        weight = DEFAULT_ROUTE_COST_WEIGHTS.get(route.cost_tier, 1.0)
+    return max(0.0, min(1.0, float(weight)))
+
+
+def _route_cost_efficiency_score(route: Route, health: Mapping | None = None) -> dict:
+    """Score a route using normalized reliability, latency, and cost signals."""
+    health = health or bridge_state.get_route_health(route.provider, route.model)
+    reliability = max(0.0, min(1.0, float(health["success_rate"])))
+    latency = _score_from_latency(float(health["avg_latency"]))
+    cost_weight = _route_cost_weight(route)
+    total = (
+        reliability * COST_EFFICIENCY_WEIGHTS["reliability"]
+        + latency * COST_EFFICIENCY_WEIGHTS["latency"]
+        - cost_weight * COST_EFFICIENCY_WEIGHTS["cost_weight"]
+    )
+    return {
+        "total": round(total, 4),
+        "reliability": round(reliability, 4),
+        "latency": round(latency, 4),
+        "cost_weight": round(cost_weight, 4),
+    }
+
+
 def _route_capability_fit(route: Route, task_type: str) -> float:
     raw = (task_type or "auto").lower().strip()
     alias = TASK_PROFILE_ALIASES.get(raw, raw)
@@ -385,8 +432,9 @@ def _route_capability_fit(route: Route, task_type: str) -> float:
     return max(0.0, min(1.0, float(scores.get("general", DEFAULT_CAPABILITY_SCORE))))
 
 
-def _route_capability_score(route: Route, task_type: str, prompt: str | None = None) -> dict:
-    health = bridge_state.get_route_health(route.provider, route.model)
+def _route_capability_score(route: Route, task_type: str, prompt: str | None = None,
+                            health: Mapping | None = None) -> dict:
+    health = health or bridge_state.get_route_health(route.provider, route.model)
     cost_priority = _get_cost_priority(route.cost_tier, task_type, prompt)
     cost_score = _score_from_cost_priority(cost_priority)
     latency_score = _score_from_latency(health["avg_latency"])
@@ -424,7 +472,8 @@ def _route_capability_score(route: Route, task_type: str, prompt: str | None = N
 def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt: str | None = None) -> List[Route]:
     def sort_key(route):
         health = bridge_state.get_route_health(route.provider, route.model)
-        score = _route_capability_score(route, task_type, prompt)["total"]
+        score = _route_capability_score(route, task_type, prompt, health)["total"]
+        cost_efficiency_score = _route_cost_efficiency_score(route, health)["total"]
         # 1. Availability status (available first, i.e. 0 for available, 1 for cooling down/exceeded budget)
         is_avail_val = 0 if health["is_available"] else 1
 
@@ -454,7 +503,19 @@ def _sort_routes_by_cost_and_health(routes: List[Route], task_type: str, prompt:
         # 7. Latency (lower latency first)
         latency = health["avg_latency"]
 
-        return (is_avail_val, soft_cap_prio, cost_prio, qos_rank, is_throttled, is_degraded, failures, neg_success_rate, neg_score, latency)
+        return (
+            is_avail_val,
+            soft_cap_prio,
+            cost_prio,
+            is_throttled,
+            -cost_efficiency_score,
+            qos_rank,
+            is_degraded,
+            failures,
+            neg_success_rate,
+            neg_score,
+            latency,
+        )
 
     return sorted(routes, key=sort_key)
 
@@ -865,13 +926,20 @@ def get_smart_router_status() -> str:
     route_details = []
     for r in routes:
         health = bridge_state.get_route_health(r.provider, r.model)
-        score = _route_capability_score(r, "auto")
+        score = _route_capability_score(r, "auto", health=health)
+        cost_efficiency = _route_cost_efficiency_score(r, health)
         route_details.append({
             "provider": r.provider,
             "model": r.model,
             "cost_tier": r.cost_tier,
             "capabilities": list(r.capabilities),
             "capability_score": score["total"],
+            "cost_efficiency_score": cost_efficiency["total"],
+            "cost_efficiency_components": {
+                "reliability": cost_efficiency["reliability"],
+                "latency": cost_efficiency["latency"],
+                "cost_weight": cost_efficiency["cost_weight"],
+            },
             "score_components": {
                 "cost": score["cost"],
                 "latency": score["latency"],
@@ -896,6 +964,7 @@ def get_smart_router_status() -> str:
         "timestamp": time.time(),
         "routes": route_details,
         "routing_profiles": ROUTING_PROFILE_WEIGHTS,
+        "cost_efficiency_weights": COST_EFFICIENCY_WEIGHTS,
         "latency_heatmap": bridge_state.get_latency_heatmap(),
     }, indent=2)
 
