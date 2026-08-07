@@ -556,6 +556,81 @@ class TestSmartRouterBridge(unittest.TestCase):
         self.assertGreater(gemini_score["latency"], groq_score["latency"])
         self.assertGreater(gemini_score["total"], groq_score["total"])
 
+    def test_cost_efficiency_score_uses_requested_composite_formula(self):
+        route = smart_router.Route(
+            "test-bridge", "test-model", "free-cloud", None, MagicMock(),
+            cost_weight=0.25,
+        )
+        health = {"success_rate": 0.8, "avg_latency": 1.0}
+
+        with patch.dict("os.environ", {"SMART_ROUTER_LATENCY_THRESHOLD": "5"}):
+            score = smart_router._route_cost_efficiency_score(route, health)
+
+        # 0.8 * 0.5 + 0.9 * 0.3 - 0.25 * 0.2 = 0.62
+        self.assertEqual(score, {
+            "total": 0.62,
+            "reliability": 0.8,
+            "latency": 0.9,
+            "cost_weight": 0.25,
+        })
+
+    def test_cost_efficiency_score_trades_reliability_for_latency(self):
+        reliable_slow = smart_router.Route(
+            "reliable-slow", "model", "free-cloud", None, MagicMock()
+        )
+        responsive = smart_router.Route(
+            "responsive", "model", "free-cloud", None, MagicMock()
+        )
+        health_map = {
+            "reliable-slow": {
+                "is_available": True, "avg_latency": 10.0,
+                "consecutive_failures": 0, "success_rate": 0.95,
+                "is_soft_capped": False, "token_bucket_available": True,
+                "provider_is_degraded": False,
+            },
+            "responsive": {
+                "is_available": True, "avg_latency": 0.0,
+                "consecutive_failures": 0, "success_rate": 0.70,
+                "is_soft_capped": False, "token_bucket_available": True,
+                "provider_is_degraded": False,
+            },
+        }
+
+        with patch.dict("os.environ", {"SMART_ROUTER_LATENCY_THRESHOLD": "5"}), \
+             patch.object(
+                 smart_router.bridge_state,
+                 "get_route_health",
+                 side_effect=lambda provider, model: health_map[provider],
+             ):
+            ordered = smart_router._sort_routes_by_cost_and_health(
+                [reliable_slow, responsive], "auto"
+            )
+
+        self.assertEqual([route.provider for route in ordered], ["responsive", "reliable-slow"])
+
+    def test_cost_efficiency_score_prefers_lower_provider_cost_weight(self):
+        expensive = smart_router.Route(
+            "expensive", "model", "free-cloud", None, MagicMock(), cost_weight=0.8
+        )
+        inexpensive = smart_router.Route(
+            "inexpensive", "model", "free-cloud", None, MagicMock(), cost_weight=0.1
+        )
+        health = {
+            "is_available": True, "avg_latency": 1.0,
+            "consecutive_failures": 0, "success_rate": 0.9,
+            "is_soft_capped": False, "token_bucket_available": True,
+            "provider_is_degraded": False,
+        }
+
+        with patch.object(
+            smart_router.bridge_state, "get_route_health", return_value=health
+        ):
+            ordered = smart_router._sort_routes_by_cost_and_health(
+                [expensive, inexpensive], "auto"
+            )
+
+        self.assertEqual([route.provider for route in ordered], ["inexpensive", "expensive"])
+
     @patch.dict("os.environ", {"GROQ_API_KEY": "gsk_test_key"}, clear=True)
     def test_successful_ask_smart_persists_latency_metrics(self):
         result = smart_router.ask_smart("metric persistence", "auto")
@@ -1556,6 +1631,15 @@ class TestSmartRouterMissingLibraries(unittest.TestCase):
         self.assertGreater(len(data["routes"]), 0)
         first_route = data["routes"][0]
         self.assertIn("capability_score", first_route)
+        self.assertIn("cost_efficiency_score", first_route)
+        self.assertEqual(
+            set(first_route["cost_efficiency_components"]),
+            {"reliability", "latency", "cost_weight"},
+        )
+        self.assertEqual(
+            data["cost_efficiency_weights"],
+            {"reliability": 0.5, "latency": 0.3, "cost_weight": 0.2},
+        )
         self.assertIn("score_components", first_route)
         self.assertEqual(
             set(first_route["score_components"]),
